@@ -7,7 +7,17 @@ export const SANDBOX_INSTALL_COMMAND = "npm install -g @openai/codex";
 
 export const DEFAULT_CODEX_LOCAL_MODEL = "gpt-5.6";
 export const DEFAULT_CODEX_LOCAL_BYPASS_APPROVALS_AND_SANDBOX = true;
-export const CODEX_LOCAL_FAST_MODE_SUPPORTED_MODELS = ["gpt-5.6", "gpt-5.5", "gpt-5.4"] as const;
+export const CODEX_LOCAL_FAST_MODE_SUPPORTED_MODELS = [
+  "gpt-5.6",
+  "gpt-5.5",
+  "gpt-5.4",
+  "gpt-5.6-sol",
+  "gpt-5.6-terra",
+  "gpt-5.6-luna",
+] as const;
+export const CODEX_LOCAL_THINKING_EFFORTS = ["minimal", "low", "medium", "high", "xhigh"] as const;
+export const CODEX_LOCAL_GPT_5_6_LUNA_THINKING_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
+export const CODEX_LOCAL_GPT_5_6_SOL_TERRA_THINKING_EFFORTS = [...CODEX_LOCAL_GPT_5_6_LUNA_THINKING_EFFORTS, "ultra"] as const;
 
 function normalizeModelId(model: string | null | undefined): string {
   return typeof model === "string" ? model.trim() : "";
@@ -34,6 +44,15 @@ export function isCodexLocalFastModeSupported(model: string | null | undefined):
   return CODEX_LOCAL_FAST_MODE_SUPPORTED_MODELS.includes(
     normalizedModel as (typeof CODEX_LOCAL_FAST_MODE_SUPPORTED_MODELS)[number],
   );
+}
+
+export function codexLocalThinkingEffortsForModel(model: string | null | undefined): readonly string[] {
+  const normalizedModel = normalizeModelId(model);
+  if (normalizedModel === "gpt-5.6-luna") return CODEX_LOCAL_GPT_5_6_LUNA_THINKING_EFFORTS;
+  if (normalizedModel === "gpt-5.6-sol" || normalizedModel === "gpt-5.6-terra") {
+    return CODEX_LOCAL_GPT_5_6_SOL_TERRA_THINKING_EFFORTS;
+  }
+  return CODEX_LOCAL_THINKING_EFFORTS;
 }
 
 export const models = [
@@ -76,7 +95,7 @@ Core fields:
 - cwd (string, optional): default absolute working directory fallback for the agent process (created if missing when possible)
 - instructionsFilePath (string, optional): absolute path to a markdown instructions file prepended to stdin prompt at runtime
 - model (string, optional): Codex model id
-- modelReasoningEffort (string, optional): reasoning effort override (minimal|low|medium|high|xhigh) passed via -c model_reasoning_effort=...
+- modelReasoningEffort (string, optional): reasoning effort override (minimal|low|medium|high|xhigh|max|ultra, model-dependent) passed via -c model_reasoning_effort=...
 - promptTemplate (string, optional): run prompt template
 - search (boolean, optional): run codex with --search
 - fastMode (boolean, optional): enable Codex Fast mode; supported on GPT-5.6, GPT-5.5, GPT-5.4 and passed through for manual model IDs
