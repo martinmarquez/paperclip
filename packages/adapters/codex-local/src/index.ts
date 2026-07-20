@@ -6,7 +6,7 @@ export const label = "Codex";
 export const SANDBOX_INSTALL_COMMAND = "npm install -g @openai/codex";
 
 export const DEFAULT_CODEX_LOCAL_MODEL = "gpt-5.6";
-export const DEFAULT_CODEX_LOCAL_BYPASS_APPROVALS_AND_SANDBOX = true;
+export const DEFAULT_CODEX_LOCAL_BYPASS_APPROVALS_AND_SANDBOX = false;
 export const CODEX_LOCAL_FAST_MODE_SUPPORTED_MODELS = [
   "gpt-5.6",
   "gpt-5.5",
@@ -53,6 +53,13 @@ export function codexLocalThinkingEffortsForModel(model: string | null | undefin
     return CODEX_LOCAL_GPT_5_6_SOL_TERRA_THINKING_EFFORTS;
   }
   return CODEX_LOCAL_THINKING_EFFORTS;
+}
+
+export function codexLocalSessionProfileError(config: Record<string, unknown>): string | null {
+  const bypass = config.dangerouslyBypassApprovalsAndSandbox === true
+    || config.dangerouslyBypassSandbox === true;
+  if (bypass) return "Codex approval bypass is not allowed for governed Paperclip agents.";
+  return null;
 }
 
 export const models = [

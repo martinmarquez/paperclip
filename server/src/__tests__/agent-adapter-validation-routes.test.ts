@@ -317,6 +317,41 @@ describe("agent routes adapter validation", () => {
     const env = (adapterConfig.env as Record<string, unknown> | undefined) ?? {};
     expect(env.OPENAI_API_KEY).toBeUndefined();
     expect(env.CODEX_HOME).toBeUndefined();
+    expect(adapterConfig.dangerouslyBypassApprovalsAndSandbox).toBe(false);
+  });
+
+  it("rejects approval-bypass config for governed codex_local agents", async () => {
+    const app = await createApp();
+    const res = await requestApp(app, (baseUrl) =>
+      request(baseUrl)
+        .post("/api/companies/company-1/agents")
+        .send({
+          name: "Unsafe Codex Agent",
+          adapterType: "codex_local",
+          adapterConfig: {
+            dangerouslyBypassApprovalsAndSandbox: true,
+          },
+        }),
+    );
+
+    expect(res.status, JSON.stringify(res.body)).toBe(422);
+    expect(res.body.error).toContain("approval bypass");
+  });
+
+  it("accepts GPT-5.6 ACP startup profiles", async () => {
+    const app = await createApp();
+    const res = await requestApp(app, (baseUrl) =>
+      request(baseUrl)
+        .patch("/api/agents/11111111-1111-4111-8111-111111111111")
+        .send({
+          adapterConfig: {
+            model: "gpt-5.6-sol",
+            modelReasoningEffort: "ultra",
+          },
+        }),
+    );
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
   });
 
   it("does not re-inject CODEX_HOME or OPENAI_API_KEY when updating a keyless codex_local agent", async () => {

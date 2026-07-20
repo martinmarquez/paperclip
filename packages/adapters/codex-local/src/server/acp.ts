@@ -31,6 +31,7 @@ import {
   asString,
   parseObject,
 } from "@paperclipai/adapter-utils/server-utils";
+import { codexLocalSessionProfileError } from "../index.js";
 import { classifyCodexAuthRefreshFailure } from "./parse.js";
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
@@ -368,6 +369,20 @@ export async function testCodexAcpEnvironment(
 ): Promise<AdapterEnvironmentTestResult> {
   const checks: AdapterEnvironmentCheck[] = [];
   const config = parseObject(ctx.config);
+  const profileError = codexLocalSessionProfileError(config);
+  if (profileError) {
+    return {
+      adapterType: ctx.adapterType,
+      status: "fail",
+      checks: [{
+        code: "codex_acp_session_profile_incompatible",
+        level: "error",
+        message: profileError,
+        hint: "Disable Codex approval bypass for governed Paperclip agents.",
+      }],
+      testedAt: new Date().toISOString(),
+    };
+  }
   const target = ctx.executionTarget ?? null;
   const targetIsRemote = target?.kind === "remote";
 

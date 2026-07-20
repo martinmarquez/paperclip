@@ -425,6 +425,26 @@ describe("codex_local ACP lane", () => {
     );
   });
 
+  it("fails preflight before bootstrap when approval bypass is enabled", async () => {
+    const result = await testCodexAcpEnvironment({
+      adapterType: "codex_local",
+      companyId: "company-1",
+      config: {
+        engine: "acp",
+        dangerouslyBypassApprovalsAndSandbox: true,
+      },
+    });
+
+    expect(result.status).toBe("fail");
+    expect(result.checks).toContainEqual(
+      expect.objectContaining({
+        code: "codex_acp_session_profile_incompatible",
+        level: "error",
+        message: expect.stringContaining("approval bypass"),
+      }),
+    );
+  });
+
   it("executes through ACPX with Codex session config and ephemeral skills", async () => {
     const root = await makeTempRoot("paperclip-codex-acp-exec-");
     const skill = await createRuntimeSkill(root);
