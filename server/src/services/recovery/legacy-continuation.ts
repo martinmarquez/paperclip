@@ -27,6 +27,11 @@ export const LEGACY_DISPOSITION_REPAIR_INSTRUCTION =
   "The previous task run ended without a recorded disposition or an owned next execution path. " +
   "Re-read the current task state. Use Paperclip tools/API to record completion, a real blocker, " +
   "a question or approval request, or a supported next execution path. " +
+  "If authorized work remains on your own issue without a real blocker, request exactly one next turn via " +
+  "POST /api/agents/<your-agent-id>/wakeup with reason issue_resumed, payload {issueId: <current-issue-id>}, " +
+  "and idempotencyKey continue:<issue-id>:<current-run-id>. Reuse that key on retries. " +
+  "A response reason issue_execution_deferred means the wake waits for this run to finish; " +
+  "do not mistake its executionRunId for a new run or retry an obsolete recovery notice. " +
   "A final message alone does not record disposition. Respect Stop, pause, budget and approval gates.";
 
 function record(value: unknown): Record<string, unknown> {

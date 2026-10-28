@@ -11,6 +11,14 @@ describe("legacy continuation authority", () => {
   it("requests agent repair for a successful process without a task disposition", () => {
     expect(decideLegacyContinuation(input)).toMatchObject({ kind: "enqueue", nextAttempt: 1 });
   });
+  it("gives the owner an idempotent supported continuation action", () => {
+    const decision = decideLegacyContinuation(input);
+    if (decision.kind !== "enqueue") throw new Error("Expected owner repair");
+    expect(decision.instruction).toContain("POST /api/agents/<your-agent-id>/wakeup");
+    expect(decision.instruction).toContain("reason issue_resumed");
+    expect(decision.instruction).toContain("idempotencyKey continue:<issue-id>:<current-run-id>");
+    expect(decision.instruction).toContain("Respect Stop, pause, budget and approval gates");
+  });
   it.each(["done", "cancelled", "blocked", "in_review"])("respects persisted %s disposition", status => {
     expect(decideLegacyContinuation({ ...input, issue: { ...input.issue!, status } }).kind).toBe("skip");
   });

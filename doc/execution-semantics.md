@@ -1612,3 +1612,10 @@ task-document path before implementation or a decision. An unavailable revision
 is a blocker, never approval or permission to infer missing requirements. This
 changes delivery only: stored plans, history, work modes and approval gates stay
 intact.
+
+### Explicit continuation wakes
+
+Explicit same-owner `issue_resumed` wakes requested during a running turn are
+deferred until that turn releases the issue, rather than merged into the turn
+they are supposed to follow. The existing queue deduplication and dispatch
+admission gates still apply; generic pings keep their coalescing behavior.
