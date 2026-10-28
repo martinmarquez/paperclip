@@ -1475,12 +1475,15 @@ function projectIssueWakeRequest(
     finishedAt: Date | string | null;
     error: string | null;
   },
-  options: { includeInternalIds: boolean },
+  options: { includeInternalIds: boolean; actorAgentId?: string },
 ): IssueWakeDiagnosticWakeRequest {
   const status = projectWakeDiagnosticStatus(row.status);
   return {
     kind: "wake_request",
-    agentId: options.includeInternalIds ? row.agentId : null,
+    agentId:
+      options.includeInternalIds || row.agentId === options.actorAgentId
+        ? row.agentId
+        : null,
     source: projectWakeDiagnosticSource(row.source) ?? "other",
     reason: projectWakeDiagnosticReason(row.reason),
     status,
@@ -1709,6 +1712,7 @@ function buildIssueWakeDiagnosticsResponse(input: {
   truncatedWakeRequests: boolean;
   truncatedActivityRecords: boolean;
   includeInternalIds: boolean;
+  actorAgentId?: string;
   maxWakeRequests?: number;
   maxActivityRecords?: number;
   lookbackDays?: number;
@@ -1718,6 +1722,7 @@ function buildIssueWakeDiagnosticsResponse(input: {
     ...input.wakeRequests.map((record) =>
       projectIssueWakeRequest(record, {
         includeInternalIds: input.includeInternalIds,
+        actorAgentId: input.actorAgentId,
       }),
     ),
     ...input.activityRecords.map((record) =>
@@ -8749,6 +8754,7 @@ export function issueRoutes(
       truncatedWakeRequests: wakeDiagnostic.truncatedWakeRequests,
       truncatedActivityRecords: wakeDiagnostic.truncatedActivityRecords,
       includeInternalIds,
+      actorAgentId: req.actor.type === "agent" ? req.actor.agentId : undefined,
     });
 
     logger.info(

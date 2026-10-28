@@ -1615,6 +1615,8 @@ intact.
 
 ### Explicit continuation wakes
 
+Wake diagnostics preserve the authenticated agent's own `agentId` even without `company_scope:read`, so it can recognize an existing continuation. Other agents' IDs, run IDs and activity IDs retain their normal redaction. This exception applies only to the authorized issue's `/diagnostics/wakes` response.
+
 Explicit same-owner `issue_resumed` wakes requested during a running turn are
 deferred until that turn releases the issue, rather than merged into the turn
 they are supposed to follow. Dispatch admission gates still apply; generic
