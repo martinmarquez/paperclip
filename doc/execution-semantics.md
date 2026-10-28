@@ -808,6 +808,14 @@ Task watchdog evaluation is conservative. If any included issue has a live run, 
 
 A saved wake behind an effective execution-recovery hold is not a live path, including when its recovery record is resolved but retains a no-replay disposition. The watchdog may inspect that stopped state; the hold and saved messages remain intact, and normal admission still controls any continuation.
 
+Periodic heartbeat recovery runs each durable queue independently. A failing or
+hanging orphan reaper must not suppress scheduled retries, queued work,
+dependency recovery, watchdogs or stale-lock checks. Each queue is single-flight;
+completed or failed sweeps become eligible on the next scheduler tick. Existing
+retry budgets, backoff, ownership, pause, approval and execution-hold gates still
+decide whether work may resume. Recovery scheduling is not permission to replay
+an action with an unknown outcome.
+
 If no included issue has a live path, Paperclip computes a stop fingerprint from durable subtree state, including at least:
 
 - included leaf issue ids, statuses, assignees, and latest durable update timestamps
