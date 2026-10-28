@@ -806,6 +806,8 @@ The reusable watchdog issue is a child of the watched source issue for audit and
 
 Task watchdog evaluation is conservative. If any included issue has a live run, queued wake, or scheduled retry that should fire without intervention, the subtree is live and the task watchdog does not run.
 
+A saved wake behind an effective execution-recovery hold is not a live path, including when its recovery record is resolved but retains a no-replay disposition. The watchdog may inspect that stopped state; the hold and saved messages remain intact, and normal admission still controls any continuation.
+
 If no included issue has a live path, Paperclip computes a stop fingerprint from durable subtree state, including at least:
 
 - included leaf issue ids, statuses, assignees, and latest durable update timestamps
