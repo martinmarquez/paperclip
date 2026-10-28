@@ -1615,6 +1615,8 @@ intact.
 
 ### Explicit continuation wakes
 
+An agent that reports a blocker owned by itself is already aware of that blocker; recording it does not send an immediate `issue_unblock_requested` wake back to the reporting agent. Board requests and blockers delegated to another agent still notify their owner. Waiting on another issue requires a first-class blocker relation; prose in an unblock descriptor does not create that dependency.
+
 Wake diagnostics preserve the authenticated agent's own `agentId` even without `company_scope:read`, so it can recognize an existing continuation. Other agents' IDs, run IDs and activity IDs retain their normal redaction. This exception applies only to the authorized issue's `/diagnostics/wakes` response.
 
 Explicit same-owner `issue_resumed` wakes requested during a running turn are

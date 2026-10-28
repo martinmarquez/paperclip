@@ -13827,6 +13827,7 @@ export function issueRoutes(
         let ownerNotifiedAt: Date | null = null;
         await deliverAgentUnblockNotification({
           issue: blockedIssue,
+          reportingAgentId: req.actor.type === "agent" ? req.actor.agentId : undefined,
           wakeup: heartbeat.wakeup,
           markNotified: async (blockedOwnerNotifiedAt) => {
             ownerNotifiedAt = blockedOwnerNotifiedAt;
