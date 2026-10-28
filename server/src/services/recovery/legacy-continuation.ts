@@ -27,11 +27,14 @@ export const LEGACY_DISPOSITION_REPAIR_INSTRUCTION =
   "The previous task run ended without a recorded disposition or an owned next execution path. " +
   "Re-read the current task state. Use Paperclip tools/API to record completion, a real blocker, " +
   "a question or approval request, or a supported next execution path. " +
-  "If authorized work remains on your own issue without a real blocker, request exactly one next turn via " +
+  "If authorized work remains on your own issue without a real blocker, first read " +
+  "GET /api/issues/<current-issue-id>/diagnostics/wakes. Keep an existing queued/deferred wake for your agent " +
+  "and this issue, including an existing merged wake; do not request another turn when that path already exists. " +
+  "Otherwise request exactly one next turn via " +
   "POST /api/agents/<your-agent-id>/wakeup with reason issue_resumed and payload {issueId: <current-issue-id>}. " +
   "Do not resend an ambiguous request: ordinary wake idempotency keys do not guarantee single delivery. " +
-  "Read GET /api/issues/<current-issue-id>/diagnostics/wakes and confirm a newly persisted queued/deferred request " +
-  "for your agent and this request before claiming continuation. HTTP 202, issue_execution_deferred, " +
+  "Re-read wake diagnostics and confirm an owned queued/deferred wake or a distinct admitted successor " +
+  "for this issue before claiming continuation; a merged wake need not have a new row. HTTP 202, issue_execution_deferred, " +
   "or the current executionRunId alone do not prove admission. If admission cannot be verified, record that " +
   "specific delivery blocker instead of sending another wake or retrying an obsolete recovery notice. " +
   "A final message alone does not record disposition. Respect Stop, pause, budget and approval gates.";

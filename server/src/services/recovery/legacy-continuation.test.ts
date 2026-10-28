@@ -18,6 +18,7 @@ describe("legacy continuation authority", () => {
     expect(decision.instruction).toContain("reason issue_resumed");
     expect(decision.instruction).toContain("Do not resend an ambiguous request");
     expect(decision.instruction).toContain("/diagnostics/wakes");
+    expect(decision.instruction).toContain("including an existing merged wake");
     expect(decision.instruction).toContain("alone do not prove admission");
     expect(decision.instruction).toContain("Respect Stop, pause, budget and approval gates");
   });
