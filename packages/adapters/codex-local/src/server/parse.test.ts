@@ -221,6 +221,19 @@ describe("isCodexTransientUpstreamError", () => {
     expect(extractCodexRetryNotBefore({ errorMessage })).toBeNull();
   });
 
+  it.each(["Nov 2nd, 2026 3:09 AM", "Nov 2, 2026 3:09 AM"])("extracts the dated subscription reset %s", (reset) => {
+    const errorMessage = `You’ve hit your usage limit. Visit https://chatgpt.com/settings/usage to purchase more credits or try again at ${reset}.`;
+    const now = new Date(2026, 9, 28, 12);
+    expect(isCodexProviderQuotaError({ errorMessage })).toBe(true);
+    expect(extractCodexRetryNotBefore({ errorMessage }, now)?.getTime()).toBe(
+      new Date(2026, 10, 2, 3, 9).getTime(),
+    );
+  });
+
+  it.each(["Feb 30th, 2026 3:09 AM", "Nov 2nd, 2026 13:09 AM", "Nov 2nd, 2026 3:60 AM", "Oct 27th, 2026 3:09 AM"])("does not invent a future reset for %s", (reset) => {
+    expect(extractCodexRetryNotBefore({ errorMessage: `You've hit your usage limit. Try again at ${reset}.` }, new Date(2026, 9, 28))).toBeNull();
+  });
+
   it("parses explicit timezone hints on usage-limit retry windows", () => {
     const errorMessage = "You've hit your usage limit for GPT-5.3-Codex-Spark. Switch to another model now, or try again at 11:31 PM (America/Chicago).";
     const now = new Date("2026-04-23T03:29:02.000Z");
