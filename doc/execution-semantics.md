@@ -1617,5 +1617,8 @@ intact.
 
 Explicit same-owner `issue_resumed` wakes requested during a running turn are
 deferred until that turn releases the issue, rather than merged into the turn
-they are supposed to follow. The existing queue deduplication and dispatch
-admission gates still apply; generic pings keep their coalescing behavior.
+they are supposed to follow. Dispatch admission gates still apply; generic
+pings keep their coalescing behavior. Ordinary wake keys do not guarantee
+single delivery after promotion: do not blindly resend an ambiguous request.
+Confirm the persisted receipt through wake diagnostics; a deferred-looking
+response or the current execution ID alone does not prove a successor exists.

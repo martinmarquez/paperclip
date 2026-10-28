@@ -28,10 +28,12 @@ export const LEGACY_DISPOSITION_REPAIR_INSTRUCTION =
   "Re-read the current task state. Use Paperclip tools/API to record completion, a real blocker, " +
   "a question or approval request, or a supported next execution path. " +
   "If authorized work remains on your own issue without a real blocker, request exactly one next turn via " +
-  "POST /api/agents/<your-agent-id>/wakeup with reason issue_resumed, payload {issueId: <current-issue-id>}, " +
-  "and idempotencyKey continue:<issue-id>:<current-run-id>. Reuse that key on retries. " +
-  "A response reason issue_execution_deferred means the wake waits for this run to finish; " +
-  "do not mistake its executionRunId for a new run or retry an obsolete recovery notice. " +
+  "POST /api/agents/<your-agent-id>/wakeup with reason issue_resumed and payload {issueId: <current-issue-id>}. " +
+  "Do not resend an ambiguous request: ordinary wake idempotency keys do not guarantee single delivery. " +
+  "Read GET /api/issues/<current-issue-id>/diagnostics/wakes and confirm a newly persisted queued/deferred request " +
+  "for your agent and this request before claiming continuation. HTTP 202, issue_execution_deferred, " +
+  "or the current executionRunId alone do not prove admission. If admission cannot be verified, record that " +
+  "specific delivery blocker instead of sending another wake or retrying an obsolete recovery notice. " +
   "A final message alone does not record disposition. Respect Stop, pause, budget and approval gates.";
 
 function record(value: unknown): Record<string, unknown> {
