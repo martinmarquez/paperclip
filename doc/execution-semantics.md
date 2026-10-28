@@ -1601,3 +1601,14 @@ use the same activity projection. Board-owned repairs stay actionable until a
 verified native retry actually starts. Once an explicit board retry is running,
 its live activity takes precedence over the prior owner and exhausted budget.
 Resolved and cancelled actions remain resolved.
+
+### Large task plans
+
+Assignment prompts inline plans up to 64,000 characters. Larger plans are
+delivered by document and revision reference so a fresh continuation can retain
+its conversation history without exceeding the provider's input limit. The
+agent must read the complete exact revision through the ordinary authorized
+task-document path before implementation or a decision. An unavailable revision
+is a blocker, never approval or permission to infer missing requirements. This
+changes delivery only: stored plans, history, work modes and approval gates stay
+intact.

@@ -151,6 +151,42 @@ describe("buildPaperclipTaskMarkdown", () => {
       taskPlan,
     })).not.toContain("ACCEPTANCE_PHRASE");
   });
+  it("defers oversized plans by exact revision without removing work mode or approval gates", () => {
+    const taskPlan = {
+      documentId: "document", revisionId: "approved-revision", revisionNumber: 4,
+      body: "PRIVATE_PLAN_BODY".repeat(40_000),
+    };
+    for (const includeDescription of [true, false]) {
+      for (const workMode of ["standard", "planning", "ask"]) {
+        const prompt = buildPaperclipTaskMarkdown({
+          issue: { id: "task", identifier: "PAP-1", title: "Delivery", workMode },
+          taskPlan, includeDescription,
+          acceptedPlan: { documentId: "document", revisionId: "approved-revision", revisionNumber: 4 },
+        });
+        expect(prompt.length).toBeLessThan(10_000);
+        expect(prompt).not.toContain("PRIVATE_PLAN_BODY");
+        expect(prompt).toContain("GET /api/issues/task/documents/plan");
+        expect(prompt).toContain("Verify revision approved-revision");
+        expect(prompt).toContain("deferred, not truncated or summarized");
+        expect(prompt).toContain("do not infer requirements, acceptance, or approval");
+        expect(prompt).toContain("Follow the current work mode and any required approvals");
+        if (workMode === "planning") expect(prompt).toContain("Make the plan only");
+        if (workMode === "ask") expect(prompt).toContain("Answer the question directly");
+      }
+    }
+    expect(taskPlan.body).toHaveLength(680_000);
+  });
+
+  it("keeps plans at the inline budget intact", () => {
+    const body = "x".repeat(64_000);
+    const prompt = buildPaperclipTaskMarkdown({
+      issue: { id: "task", identifier: null, title: "Delivery" },
+      taskPlan: { documentId: "document", revisionId: "revision", revisionNumber: 1, body },
+    });
+    expect(prompt).toContain(body);
+    expect(prompt).not.toContain("is deferred");
+  });
+
   it("hands an accepted chat plan to assigned project tasks using the approved revision", () => {
     const prompt = buildPaperclipTaskMarkdown({
       issue: { id: "chat", identifier: null, title: "Agent chat", workMode: "planning", conversationAgentId: "agent", description: null },

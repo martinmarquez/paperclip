@@ -8926,8 +8926,17 @@ export function buildPaperclipTaskMarkdown(input: {
         "",
         `Task plan document ${input.taskPlan.documentId}, revision ${input.taskPlan.revisionNumber} (${input.taskPlan.revisionId}):`,
         "Use this plan as assignment context, including its outcome and acceptance criteria. Follow the current work mode and any required approvals.",
-        fenceTaskText(input.taskPlan.body.trim()),
       );
+      if (input.taskPlan.body.length > 64_000) {
+        // Large plans plus preserved conversation history can exceed the provider's input limit.
+        lines.push(
+          `Plan body (${input.taskPlan.body.length} characters) is deferred, not truncated or summarized.`,
+          `Before implementing or making a decision, read the full plan using the task document tool or GET /api/issues/${issue.id}/documents/plan with your normal task authorization. Verify revision ${input.taskPlan.revisionId}; if it differs, retrieve that revision from GET /api/issues/${issue.id}/documents/plan/revisions. Read in bounded sections when necessary.`,
+          "If the exact revision cannot be read, record that blocker and do not infer requirements, acceptance, or approval. The plan and all conversation history remain unchanged.",
+        );
+      } else {
+        lines.push(fenceTaskText(input.taskPlan.body.trim()));
+      }
     }
   }
   if (ancestors.length > 0) {
