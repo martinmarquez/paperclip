@@ -234,6 +234,21 @@ describe("isCodexTransientUpstreamError", () => {
     expect(extractCodexRetryNotBefore({ errorMessage: `You've hit your usage limit. Try again at ${reset}.` }, new Date(2026, 9, 28))).toBeNull();
   });
 
+  it("extracts a reset split between the ACP title and details", () => {
+    const errorMessage = ["You’ve hit your usage limit", "Try again at Nov 2nd, 2026 3:09 AM."].join("\n");
+    expect(extractCodexRetryNotBefore({ errorMessage }, new Date(2026, 9, 28))?.getTime()).toBe(new Date(2026, 10, 2, 3, 9).getTime());
+    expect(extractCodexRetryNotBefore({ errorMessage: errorMessage.replace("\n", "\nUnrelated message\n") }, new Date(2026, 9, 28))).toBeNull();
+  });
+
+  it.each([
+    ["Nov 2nd, 2026 3:09 AM (America/Chicago)", "2026-11-02T09:09:00.000Z"],
+    ["Nov 2nd, 2026 3:09 AM UTC", "2026-11-02T03:09:00.000Z"],
+    ["Nov 2nd, 2026 3:09 AM (Unknown/Zone)", undefined],
+    ["Feb 30th, 2026 3:09 AM (America/Chicago)", undefined],
+  ])("respects dated timezone hint %s", (reset, expected) => {
+    expect(extractCodexRetryNotBefore({ errorMessage: `You've hit your usage limit. Try again at ${reset}.` }, new Date("2026-01-01T00:00:00Z"))?.toISOString()).toBe(expected);
+  });
+
   it("parses explicit timezone hints on usage-limit retry windows", () => {
     const errorMessage = "You've hit your usage limit for GPT-5.3-Codex-Spark. Switch to another model now, or try again at 11:31 PM (America/Chicago).";
     const now = new Date("2026-04-23T03:29:02.000Z");
