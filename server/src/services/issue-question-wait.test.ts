@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { AskUserQuestionsPayload } from "@paperclipai/shared";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { agents, companies, createDb, heartbeatRuns, issues, issueThreadInteractions } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "../__tests__/helpers/embedded-postgres.js";
@@ -38,11 +39,12 @@ describePostgres("assignee question wait evidence", () => {
     await db.insert(agents).values([agentId, otherId].map((id) => ({ id, companyId, name: id, role: "engineer", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} })));
     await db.insert(issues).values([issueId, otherIssueId].map((id) => ({ id, companyId, title: "Question wait", status: "in_progress", priority: "medium", assigneeAgentId: agentId })));
     await db.insert(heartbeatRuns).values([runId, otherRunId].map((id) => ({ id, companyId, agentId, status: "running" })));
+    const payload: AskUserQuestionsPayload = { version: 1, questions: [{ id: "scope", prompt: "Which scope?", selectionMode: "single", options: [{ id: "continue", label: "Continue" }] }] };
     if (!("noQuestion" in testCase)) await db.insert(issueThreadInteractions).values({ companyId, issueId: "otherIssue" in testCase ? otherIssueId : issueId,
       kind: "kind" in testCase ? testCase.kind : "ask_user_questions", status: "status" in testCase ? testCase.status : "pending",
       continuationPolicy: "continuationPolicy" in testCase ? testCase.continuationPolicy : "wake_assignee",
       createdByAgentId: "otherCreator" in testCase ? otherId : agentId, sourceRunId: "otherRun" in testCase ? otherRunId : runId,
-      payload: { version: 1, questions: [{ id: "scope", prompt: "Which scope?", selectionMode: "single", options: [{ id: "continue", label: "Continue" }] }] },
+      payload,
     });
     expect(await hasAssigneeQuestionWait(db, { companyId: "otherCompany" in testCase ? randomUUID() : companyId, issueId,
       assigneeAgentId: "nonAssignee" in testCase ? otherId : agentId,

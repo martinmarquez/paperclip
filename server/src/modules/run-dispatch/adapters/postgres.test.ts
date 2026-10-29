@@ -17,7 +17,7 @@ import {
   issueTreeHolds,
   issues,
 } from "@paperclipai/db";
-import { ISSUE_CONTINUATION_SUMMARY_DOCUMENT_KEY } from "@paperclipai/shared";
+import { ISSUE_CONTINUATION_SUMMARY_DOCUMENT_KEY, type AskUserQuestionsPayload } from "@paperclipai/shared";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -615,6 +615,7 @@ describeEmbeddedPostgres("run-dispatch postgres adapter", () => {
           reviewRequest: null, completedStageIds: [], lastDecisionId: null, lastDecisionOutcome: null } : null,
       });
       await seedIssue({ companyId, issueId: otherIssueId, status: "in_progress", assigneeAgentId: ownerId });
+      const payload: AskUserQuestionsPayload = { version: 1, questions: [{ id: "scope", prompt: "Which scope?", selectionMode: "single", options: [{ id: "continue", label: "Continue" }] }] };
       if (!("missing" in testCase)) await db.insert(issueThreadInteractions).values({
         id: interactionId, companyId, issueId: "wrongIssue" in testCase ? otherIssueId : issueId,
         kind: "kind" in testCase ? testCase.kind : "ask_user_questions",
@@ -622,7 +623,7 @@ describeEmbeddedPostgres("run-dispatch postgres adapter", () => {
         effectiveResolverPolicy: "policy" in testCase ? testCase.policy : "anyone",
         addresseeAgentId: "wrongAddressee" in testCase ? ownerId : agentId,
         createdByAgentId: ownerId,
-        payload: { version: 1, questions: [{ id: "scope", prompt: "Which scope?", selectionMode: "single", options: [{ id: "continue", label: "Continue" }] }] },
+        payload,
       });
       const runId = await seedRun({ companyId, agentId, contextSnapshot: {
         issueId, interactionId: "malformed" in testCase ? "not-a-uuid" : interactionId, source: "issue.interaction.created",
