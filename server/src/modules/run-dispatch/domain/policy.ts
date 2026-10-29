@@ -40,6 +40,8 @@ export type DispositionRepairFacts = {
 };
 
 export type ReviewParticipantFacts = {
+  /** False when a stage-bound run outlived its exact pending stage. */
+  expectedStageMatches?: boolean;
   isInReview: boolean;
   hasParticipant: boolean;
   participantIsAgent: boolean;
@@ -243,11 +245,12 @@ type ReviewParticipantOutcome = "ok" | "participant_changed";
 /**
  * Decides whether the current review participant still matches the run's
  * agent. An issue with no assigned participant, or one not in review, never
- * blocks here.
+ * blocks here unless the run is bound to an obsolete execution stage.
  */
 function decideReviewParticipant(
   facts: ReviewParticipantCheckFacts,
 ): ReviewParticipantOutcome {
+  if (facts.expectedStageMatches === false) return "participant_changed";
   if (!facts.isInReview || !facts.hasParticipant) return "ok";
   const participantMatches =
     facts.participantIsAgent && facts.participantAgentId === facts.runAgentId;
@@ -438,7 +441,7 @@ export function decideScheduledRetryGate(
     return {
       allowed: false,
       reason:
-        "Scheduled retry suppressed because the issue is waiting on another review participant",
+        "Scheduled retry suppressed because the review stage or participant changed",
       errorCode: "issue_review_participant_changed",
       issueId: facts.issueId,
       details: {
@@ -673,7 +676,7 @@ export function decideQueuedRunStaleness(
       stale: true,
       errorCode: "issue_review_participant_changed",
       reason:
-        "Cancelled because the in-review participant changed before the queued run could start; the current participant will be woken instead",
+        "Cancelled because the review stage or participant changed before the queued run could start; the current participant will be woken instead",
       details: {
         issueId: facts.issueId,
         currentStageType: facts.reviewParticipant.currentStageType,

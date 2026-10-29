@@ -135,10 +135,13 @@ function classifyRetryReasonKind(retryReason: string | null): RetryReasonKind {
 
 function buildReviewParticipantFacts(input: {
   isInReview: boolean;
+  expectedStageId?: string | null;
   executionState: ReturnType<typeof parseIssueExecutionState>;
 }): ReviewParticipantFacts {
   const currentParticipant = input.executionState?.currentParticipant ?? null;
   return {
+    ...(input.expectedStageId ? { expectedStageMatches: input.executionState?.status === "pending" &&
+      input.executionState.currentStageId === input.expectedStageId } : {}),
     isInReview: input.isInReview,
     hasParticipant: currentParticipant !== null,
     participantIsAgent: currentParticipant?.type === "agent",
@@ -381,6 +384,7 @@ export function createPostgresRunDispatchAdapter(
     }) ?? buildReviewParticipantFacts({
       isInReview: issue.status === "in_review",
       executionState: parseIssueExecutionState(issue.executionState),
+      expectedStageId: readNonEmptyString(input.contextSnapshot.currentStageId),
     });
 
     // The gate checks a disposition repair's own supersession before it
@@ -628,6 +632,7 @@ export function createPostgresRunDispatchAdapter(
           }) ?? buildReviewParticipantFacts({
             isInReview: issue.status === "in_review",
             executionState: issue.status === "in_review" ? parseIssueExecutionState(issue.executionState) : null,
+            expectedStageId: readNonEmptyString(context.currentStageId),
           })
         : NO_REVIEW_PARTICIPANT,
     };

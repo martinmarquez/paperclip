@@ -9472,6 +9472,23 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId))).toHaveLength(1);
   });
 
+  it("cancels a queued first-review recovery when the same agent moves to another stage", async () => {
+    const { companyId, agentId, issueId, stageId } = await seedFirstReviewHandoff();
+    expect((await heartbeatService(db).reconcileStrandedAssignedIssues()).reviewParticipantRequeued).toBe(1);
+    const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId));
+    const [issue] = await db.select().from(issues).where(eq(issues.id, issueId));
+    expect(run!.contextSnapshot).toMatchObject({ currentStageId: stageId });
+    await db.update(issues).set({ executionState: { ...issue!.executionState,
+      currentStageId: randomUUID(), currentStageIndex: 1 } }).where(eq(issues.id, issueId));
+    const { createPostgresRunDispatchAdapter } = await import("../modules/run-dispatch/adapters/postgres.js");
+    const adapter = createPostgresRunDispatchAdapter(db);
+    expect(await adapter.evaluateScheduledRetryGate({ companyId, runId: run!.id, retryReasonOverride: "execution_review_participant_recovery", now: new Date() }))
+      .toMatchObject({ allowed: false, errorCode: "issue_review_participant_changed" });
+    expect(await adapter.cancelStaleQueuedRun({ companyId, runId: run!.id, expectedStatus: "queued", now: new Date() }))
+      .toMatchObject({ outcome: "cancelled", errorCode: "issue_review_participant_changed" });
+    expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, run!.id)))[0]!.startedAt).toBeNull();
+  });
+
   it.each(["pause", "paused-agent", "board-recovery"] as const)("keeps first-review recovery behind an active %s gate", async gate => {
     const { companyId, agentId, issueId } = await seedFirstReviewHandoff();
     if (gate === "pause") await db.insert(issueTreeHolds).values({ companyId, rootIssueId: issueId,
