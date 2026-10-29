@@ -252,6 +252,8 @@ describe("GET /health", () => {
     const backupFile = path.join(backupDir, "paperclip-20260706-031702.sql.gz");
     const alertFile = path.join(backupDir, "db-backup-to-s3.failure");
     fs.writeFileSync(backupFile, "backup");
+    const completedAt = new Date("2026-07-06T03:17:02.000Z");
+    fs.utimesSync(backupFile, completedAt, completedAt);
     fs.writeFileSync(alertFile, "db-backup-to-s3 failed at 2026-07-06T03:17:00.000Z exit=1\n");
     const app = createApp(createHealthyDb(), testServerInfo, {
       enabled: true,
@@ -286,6 +288,8 @@ describe("GET /health", () => {
     const backupFile = path.join(backupDir, "paperclip-20260706-031702.sql.gz");
     const alertFile = path.join(backupRoot, "db-backup-to-s3.failure");
     fs.writeFileSync(backupFile, "backup");
+    const completedAt = new Date("2026-07-06T03:17:02.000Z");
+    fs.utimesSync(backupFile, completedAt, completedAt);
     fs.writeFileSync(alertFile, "db-backup-to-s3 failed beside backups\n");
     const app = createApp(createHealthyDb(), testServerInfo, {
       enabled: true,
