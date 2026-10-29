@@ -129,3 +129,9 @@ and keeps the question or answer intact. Saved comments, manual wakes, governed
 confirmations and unverified notification contexts retain their receipts.
 Reclassification grants no execution authority: normal admission still owns all
 process/lease, Stop, pause, budget and outcome checks before redelivery.
+
+Pure reviewer notices also retain terminal no-replay holds. Saved user comments
+use the existing verified continuation path instead: it checks the original
+author, stopped provider and fresh session before delivery. A broad queue filter
+must not prevent that path from examining a saved message. The old failed run
+and its unknown outcome remain in history; the fresh message does not replay it.

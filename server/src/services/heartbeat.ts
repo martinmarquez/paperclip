@@ -19771,7 +19771,7 @@ export function heartbeatService(
     const cutoff = await getWorktreeExecutionCutoff();
     const pendingInterrupts = await db.select({ id: agentWakeupRequests.id, companyId: agentWakeupRequests.companyId })
       .from(agentWakeupRequests).innerJoin(companies, eq(companies.id, agentWakeupRequests.companyId))
-      .where(and(noReplayHoldCleared, eq(agentWakeupRequests.status, "deferred_issue_execution"),
+      .where(and(eq(agentWakeupRequests.status, "deferred_issue_execution"),
         eq(companies.status, "active"),
         sql`${agentWakeupRequests.payload}->'queuedCommentInterrupt' is not null`,
         lte(agentWakeupRequests.updatedAt, new Date(Date.now() - 30_000)),
@@ -19794,7 +19794,7 @@ export function heartbeatService(
         sql`${issues.id}::text = ${agentWakeupRequests.payload}->>'issueId'`,
         eq(issues.assigneeAgentId, agentWakeupRequests.agentId)))
       .innerJoin(companies, and(eq(companies.id, issues.companyId), eq(companies.status, "active")))
-      .where(and(noReplayHoldCleared, eq(agentWakeupRequests.status, "deferred_issue_execution"),
+      .where(and(eq(agentWakeupRequests.status, "deferred_issue_execution"),
         isNull(issues.executionRunId),
         or(and(
           sql`jsonb_typeof(${agentWakeupRequests.payload} #> '{_paperclipWakeContext,wakeCommentIds}') = 'array'`,
@@ -19839,7 +19839,6 @@ export function heartbeatService(
       ))
       .innerJoin(companies, eq(companies.id, heartbeatRuns.companyId))
       .where(and(
-        noReplayHoldCleared,
         eq(agentWakeupRequests.status, "deferred_issue_execution"),
         eq(heartbeatRuns.status, "cancelled"),
         eq(heartbeatRuns.runtimeMode, "legacy"),
