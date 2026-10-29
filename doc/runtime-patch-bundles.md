@@ -83,3 +83,19 @@ operator pauses, interactions, company status and budget gates still apply.
 Queued/running work coalesces under normal admission; unsuccessful reviewer runs
 retain the existing bounded retry and escalation policy. This recovery neither
 submits a review decision nor replays the preceding participant's action.
+
+## Keep backup cadence across service restarts
+
+Automatic backup eligibility uses the last completed backup's persisted file
+mtime. Startup checks for one due backup; later checks preserve the configured
+interval, retention and freshness alert threshold. A manual backup resets that
+cadence, and failed attempts wait the configured interval before retrying in the
+same process. Warm standby and an in-flight backup never start another copy.
+Restarting the service cannot postpone an already overdue backup by another full
+interval. Missed intervals coalesce into one backup.
+
+Both backup engines write compressed output to a `.partial` path and rename it
+within the backup directory only after compression and provider completion.
+An interrupted write cannot appear as a new completed `.sql.gz` archive to the
+health check or scheduler. Failure cleanup removes the temporary output; old
+verified backups keep their normal retention policy.

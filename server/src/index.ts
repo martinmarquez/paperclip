@@ -1,3 +1,4 @@
+import { inspectDatabaseBackupHealth, isDatabaseBackupDue } from "./services/database-backup-health.js";
 import { cloudWarmStandbyServerOptions } from "./middleware/cloud-warm-standby.js";
 import { createCloudWarmStandby } from "./services/cloud-warm-standby.js";
 import { subscribeAllCompanyLiveEvents } from "./services/live-events.js";
@@ -1857,12 +1858,21 @@ async function startServerWithDatabaseTeardown(
       },
       "Automatic database backups enabled",
     );
-    setInterval(() => {
-      if (isWarmStandby()) return;
+    let lastBackupAttemptAtMs: number | null = null;
+    const runDueDatabaseBackup = () => {
+      if (isWarmStandby() || databaseBackupInFlight) return;
+      const nowMs = Date.now();
+      const health = inspectDatabaseBackupHealth({ enabled: true, backupDir: config.databaseBackupDir,
+        maxAgeHours: databaseBackupMaxAgeHours, filenamePrefix: "paperclip" });
+      if (!isDatabaseBackupDue({ latestBackupMtime: health.latestBackup?.mtime ?? null,
+        lastAttemptAtMs: lastBackupAttemptAtMs, intervalMs: backupIntervalMs, nowMs })) return;
+      lastBackupAttemptAtMs = nowMs;
       void runServerDatabaseBackup("scheduled").catch(() => {
-        // runServerDatabaseBackup already logs the failure with context.
+        // Preserve the configured retry cadence after a failed backup too.
       });
-    }, backupIntervalMs);
+    };
+    runDueDatabaseBackup();
+    setInterval(runDueDatabaseBackup, Math.min(60_000, backupIntervalMs));
   }
   
   // Wait for external adapters to finish loading before accepting requests.

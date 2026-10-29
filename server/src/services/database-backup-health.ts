@@ -39,6 +39,7 @@ export type InspectDatabaseBackupHealthOptions = {
   alertFile?: string;
   alertFiles?: string[];
   now?: Date;
+  filenamePrefix?: string;
 };
 
 function roundHours(value: number): number {
@@ -78,16 +79,17 @@ function readLastFailure(alertFiles: string[]) {
   };
 }
 
-function findLatestBackup(backupDir: string, nowMs: number) {
+function findLatestBackup(backupDir: string, nowMs: number, filenamePrefix?: string) {
   if (!existsSync(backupDir)) return null;
 
   const candidates = readdirSync(backupDir)
-    .filter((name) => name.endsWith(".sql.gz"))
+    .filter((name) => name.endsWith(".sql.gz") && (!filenamePrefix || name.startsWith(`${filenamePrefix}-`)))
     .map((name) => {
       const fullPath = join(backupDir, name);
       const stat = statSync(fullPath);
       return { fullPath, name, stat };
     })
+    .filter(({ stat }) => stat.isFile() && stat.mtimeMs <= nowMs)
     .sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs);
 
   const latest = candidates[0];
@@ -113,7 +115,7 @@ export function inspectDatabaseBackupHealth(
   let lastFailure: DatabaseBackupHealthStatus["lastFailure"] = null;
 
   try {
-    latestBackup = findLatestBackup(opts.backupDir, now.getTime());
+    latestBackup = findLatestBackup(opts.backupDir, now.getTime(), opts.filenamePrefix);
     lastFailure = readLastFailure(alertFileCandidates(opts));
 
     if (!latestBackup) {
@@ -150,4 +152,17 @@ export function inspectDatabaseBackupHealth(
     lastFailure,
     warnings,
   };
+}
+
+/** Restart-safe cadence: completed backups and failed attempts both bound retries. */
+export function isDatabaseBackupDue(input: {
+  latestBackupMtime: string | null;
+  lastAttemptAtMs: number | null;
+  intervalMs: number;
+  nowMs: number;
+}): boolean {
+  const completedAt = input.latestBackupMtime ? Date.parse(input.latestBackupMtime) : 0;
+  const validPast = (timestamp: number) => Number.isFinite(timestamp) && timestamp <= input.nowMs ? timestamp : 0;
+  const lastActivity = Math.max(validPast(completedAt), validPast(input.lastAttemptAtMs ?? 0));
+  return input.nowMs - lastActivity >= input.intervalMs;
 }
