@@ -427,6 +427,23 @@ describe("decideQueuedRunStaleness", () => {
     expect(decideQueuedRunStaleness(facts, NOW)).toEqual({ stale: false });
   });
 
+  it.each([false, true])("pending addressee review bypass requires server evidence: %s", (verified) => {
+    const result = decideQueuedRunStaleness({
+      ...baseStalenessFacts(), issueAssigneeAgentId: "agent-2", isInteractionWake: true,
+      isPendingInteractionAddresseeWake: verified, issueStatus: "in_review",
+      reviewParticipant: { ...NO_PARTICIPANT, isInReview: true, hasParticipant: true,
+        participantIsAgent: true, participantAgentId: "agent-2" },
+    }, NOW);
+    expect(result).toMatchObject(verified ? { stale: false }
+      : { stale: true, errorCode: "issue_review_participant_changed" });
+  });
+
+  it("keeps the terminal gate for a verified pending question", () => {
+    expect(decideQueuedRunStaleness({ ...baseStalenessFacts(), issueStatus: "done",
+      isInteractionWake: true, isPendingInteractionAddresseeWake: true,
+    }, NOW)).toMatchObject({ stale: true, errorCode: "issue_terminal_status" });
+  });
+
   it("allows resume intent to bypass a terminal status", () => {
     const facts: QueuedRunFacts = {
       ...baseStalenessFacts(),

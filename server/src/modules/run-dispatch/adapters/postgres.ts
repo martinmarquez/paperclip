@@ -1,3 +1,4 @@
+import { issueThreadInteractionAttentionAgentAllowed } from "../../../services/issue-thread-interaction-resolution.js";
 import { hasConversationContinuationPolicy } from "../../../services/conversation-continuation.js";
 import { getExecutionBlocker } from "../../../services/execution-blocker.js";
 import { getNativeReviewAssignment } from "../../../services/native-runtime/native-review-participant.js";
@@ -503,6 +504,24 @@ export function createPostgresRunDispatchAdapter(
     }));
   }
 
+  async function pendingQuestionAddresseeWake(dbOrTx: Db, input: LoadStalenessFactsInput) {
+    const context = input.contextSnapshot;
+    if (context.wakeReason !== "interaction_pending" || context.source !== "issue.interaction.created") return false;
+    const interactionId = readNonEmptyString(context.interactionId);
+    if (!interactionId || !/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(interactionId)) return false;
+    const [interaction] = await dbOrTx.select().from(issueThreadInteractions).where(and(
+      eq(issueThreadInteractions.id, interactionId),
+      eq(issueThreadInteractions.companyId, input.companyId),
+      eq(issueThreadInteractions.issueId, input.issueId),
+      eq(issueThreadInteractions.kind, "ask_user_questions"),
+      eq(issueThreadInteractions.status, "pending"),
+      eq(issueThreadInteractions.addresseeAgentId, input.agentId),
+    )).limit(1).for("update");
+    // The caller holds issue -> run locks. Keep the interaction locked through
+    // admission so concurrent comment supersession cannot invalidate this read.
+    return Boolean(interaction && issueThreadInteractionAttentionAgentAllowed({ agentId: input.agentId, interaction }));
+  }
+
   async function loadStalenessFacts(
     input: LoadStalenessFactsInput,
     _now: Date,
@@ -528,7 +547,8 @@ export function createPostgresRunDispatchAdapter(
     );
 
     const wakeCommentId = deriveCommentId(context);
-    const isInteractionWake = allowsIssueInteractionWake(
+    const isPendingInteractionAddresseeWake = await pendingQuestionAddresseeWake(dbOrTx, input);
+    const isInteractionWake = isPendingInteractionAddresseeWake || allowsIssueInteractionWake(
       context,
       ISSUE_TREE_CONTROL_INTERACTION_WAKE_REASONS,
     );
@@ -605,6 +625,7 @@ export function createPostgresRunDispatchAdapter(
       isConnectionContinuation: (isResolvedInteractionContinuation && context.interactionKind === "connection_intent")
         || context.source === "connection_tools.refreshed",
       isInteractionWake,
+      isPendingInteractionAddresseeWake,
       isAuthorizedSourceScopedRecovery,
       isNonAssigneeWorkspaceBusyRetry: isNonAssigneeWorkspaceBusyRetry(retryReason, context),
       resumeIntent,
