@@ -1050,6 +1050,43 @@ describe("evaluateCodexCredentialReadiness", () => {
       await fs.rm(root, { recursive: true, force: true });
     }
   });
+
+  it("allows headless discovery and grant requests only on the internal run-scoped gateway", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-discovery-"));
+    try {
+      await fs.writeFile(path.join(root, "config.toml"), '[mcp_servers."paperclip-connections"]\nurl = "https://unmanaged.example"\n');
+      await writeManagedCodexMcpConfig({ codexHome: root, apiBaseUrl: "https://paperclip.example", gateways: [
+        { name: "Paperclip connections", endpointPath: "/api/mcp/runtime-tools", bearerToken: "run-token" },
+        { name: "Neon", endpointPath: "/api/tool-gateway/neon/mcp", bearerToken: "neon-token" },
+      ] });
+      const config = await fs.readFile(path.join(root, "config.toml"), "utf8");
+      expect(config).toContain('[mcp_servers."paperclip-paperclip-connections".tools.connections_search]\napproval_mode = "approve"');
+      expect(config).toContain('[mcp_servers."paperclip-paperclip-connections".tools.connection_request]\napproval_mode = "approve"');
+      expect(config.match(/approval_mode = "approve"/g)).toHaveLength(2);
+      expect(config).not.toContain("default_tools_approval_mode");
+      expect(config).not.toContain("readOnlyHint");
+      expect(config).toContain('url = "https://unmanaged.example"');
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ["Paperclip connections", "https://foreign.example/api/mcp/runtime-tools"],
+    ["Paperclip connections", "/api/tool-gateway/other/mcp"],
+    ["Paperclip connections", "/api/mcp/runtime-tools?other=true"],
+    ["Other gateway", "/api/mcp/runtime-tools"],
+  ])("does not preapprove lookalike gateways: %s %s", async (name, endpointPath) => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-lookalike-"));
+    try {
+      await writeManagedCodexMcpConfig({ codexHome: root, apiBaseUrl: "https://paperclip.example", gateways: [
+        { name, endpointPath, bearerToken: "token" },
+      ] });
+      expect(await fs.readFile(path.join(root, "config.toml"), "utf8")).not.toContain("approval_mode");
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("stageCodexHomeForSync", () => {

@@ -318,6 +318,13 @@ function buildManagedMcpBlock(input: {
       `url = ${tomlString(url)}`,
       `http_headers = { Authorization = ${tomlString(`Bearer ${gateway.bearerToken}`)} }`,
     );
+    if (gateway.name === "Paperclip connections"
+      && url === new URL("/api/mcp/runtime-tools", input.apiBaseUrl).toString()) {
+      // These tools discover access or create a human grant card; neither grants service access.
+      for (const tool of ["connections_search", "connection_request"]) {
+        lines.push("", `[mcp_servers.${tomlString(managedName)}.tools.${tool}]`, 'approval_mode = "approve"');
+      }
+    }
   });
   lines.push(MANAGED_MCP_BLOCK_END);
   return { block: lines.join("\n"), warnings };
