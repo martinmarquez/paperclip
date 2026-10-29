@@ -9525,7 +9525,32 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(deliveries).toHaveLength(1);
   });
 
-  it.each(["comment", "confirmation", "restricted"] as const)("preserves a legacy %s receipt instead of retiring its authority", async mode => {
+  it("preserves deferred question input behind a terminal no-replay decision", async () => {
+    const { companyId, issueId, queueId } = await seedLegacyReviewerNotification();
+    await db.insert(issueRecoveryActions).values({ companyId, sourceIssueId: issueId, kind: "execution_reconciliation",
+      status: "resolved", ownerType: "board", cause: "execution_reconciliation_required", fingerprint: randomUUID(),
+      nextAction: "Explicit Board resolution required", outcome: "blocked", resolvedAt: new Date(),
+      evidence: { automaticRecovery: { replay: "blocked" } } });
+    await heartbeatService(db).resumeQueuedRuns();
+    const [wake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, queueId));
+    expect(wake!.status).toBe("deferred_issue_execution");
+    expect(wake!.updatedAt.getTime()).toBe(0);
+  });
+
+  it("leaves malformed notification input intact while retiring a valid later notification", async () => {
+    const { queueId } = await seedLegacyReviewerNotification();
+    const [wake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, queueId));
+    for (let index = 0; index < 50; index++) {
+      await db.insert(agentWakeupRequests).values({ ...wake!, id: randomUUID(), updatedAt: new Date(index),
+        payload: { ...wake!.payload, mutation: "unknown" } });
+    }
+    await db.update(agentWakeupRequests).set({ updatedAt: new Date(50) }).where(eq(agentWakeupRequests.id, queueId));
+    await heartbeatService(db).resumeQueuedRuns();
+    const [retired] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, queueId));
+    expect(retired!.status).toBe("skipped");
+  });
+
+  it.each(["comment", "answer", "confirmation", "restricted"] as const)("preserves a legacy %s receipt instead of retiring its authority", async mode => {
     const { companyId, agentId, issueId, interactionId, queueId } =
       await seedLegacyReviewerNotification(mode === "confirmation" ? "confirmation" : "agent");
     await db.update(agents).set({ status: "paused" }).where(eq(agents.id, agentId));
@@ -9537,6 +9562,11 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       const context = (wake!.payload!._paperclipWakeContext ?? {}) as Record<string, unknown>;
       await db.update(agentWakeupRequests).set({ payload: { ...wake!.payload, commentId,
         _paperclipWakeContext: { ...context, wakeCommentId: commentId, wakeCommentIds: [commentId] } } })
+        .where(eq(agentWakeupRequests.id, queueId));
+    }
+    if (mode === "answer") {
+      const [wake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, queueId));
+      await db.update(agentWakeupRequests).set({ payload: { ...wake!.payload, interactionStatus: "answered" } })
         .where(eq(agentWakeupRequests.id, queueId));
     }
     if (mode === "restricted") await db.update(issueThreadInteractions)

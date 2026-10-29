@@ -10645,6 +10645,17 @@ export function heartbeatService(
     }, queueId);
   }
 
+  // A terminal no-replay decision requires explicit Board resolution. Preserve
+  // saved inputs without repeatedly claiming them on every scheduling sweep.
+  const noReplayHoldCleared = sql`not exists (
+    select 1 from issue_recovery_actions final_hold
+    where final_hold.company_id = ${agentWakeupRequests.companyId}
+      and final_hold.source_issue_id::text = ${agentWakeupRequests.payload}->>'issueId'
+      and final_hold.status = 'resolved'
+      and final_hold.outcome = 'blocked'
+      and final_hold.evidence->'automaticRecovery'->>'replay' = 'blocked'
+  )`;
+
   async function resumeExecutionWaitComments() {
     if ((await getSchedulingSuppression()).suppressed) return;
     const waits = await db.select({ wake: agentWakeupRequests })
@@ -19683,8 +19694,22 @@ export function heartbeatService(
         eq(issueThreadInteractions.addresseeAgentId, agentWakeupRequests.agentId),
         sql`${issueThreadInteractions.id}::text = ${agentWakeupRequests.payload}->>'interactionId'`))
       .innerJoin(companies, and(eq(companies.id, issues.companyId), eq(companies.status, "active")))
-      .where(and(eq(agentWakeupRequests.status, "deferred_issue_execution"), isNull(agentWakeupRequests.runId),
+      .where(and(noReplayHoldCleared, eq(agentWakeupRequests.status, "deferred_issue_execution"), isNull(agentWakeupRequests.runId),
         eq(agentWakeupRequests.source, "automation"),
+        sql`${issues.executionState}->>'status' = 'pending'`,
+        sql`${issues.executionState}->'currentParticipant'->>'type' = 'agent'`,
+        sql`coalesce(${issues.executionState}->>'currentStageId', '') <> ''`,
+        sql`${agentWakeupRequests.payload}->>'mutation' = 'interaction'`,
+        sql`${agentWakeupRequests.payload}->>'interactionKind' = 'ask_user_questions'`,
+        sql`${agentWakeupRequests.payload} #>> '{_paperclipWakeContext,interactionKind}' = 'ask_user_questions'`,
+        sql`${agentWakeupRequests.payload}->>'interactionId' = ${agentWakeupRequests.payload} #>> '{_paperclipWakeContext,interactionId}'`,
+        sql`coalesce(${agentWakeupRequests.payload}->>'interactionStatus', '') in ('', 'pending')`,
+        sql`coalesce(${agentWakeupRequests.payload} #>> '{_paperclipWakeContext,interactionStatus}', '') in ('', 'pending')`,
+        ...["wakeCommentId", "commentId", "nativeStatusWakeIntentId", "chatRequestId", "externalChatRequestId"]
+          .flatMap(key => [
+            sql`coalesce(${agentWakeupRequests.payload}->>${key}, '') = ''`,
+            sql`coalesce(${agentWakeupRequests.payload}->'_paperclipWakeContext'->>${key}, '') = ''`,
+          ]),
         sql`${agentWakeupRequests.payload} #>> '{_paperclipWakeContext,source}' = 'issue.interaction.created'`,
         sql`${agentWakeupRequests.payload} #>> '{_paperclipWakeContext,wakeReason}' = 'interaction_pending'`,
         sql`coalesce(${agentWakeupRequests.payload} #> '{_paperclipWakeContext,wakeCommentIds}', '[]'::jsonb) = '[]'::jsonb`,
@@ -19704,7 +19729,7 @@ export function heartbeatService(
           const [issue] = await tx.select().from(issues).where(and(eq(issues.id, candidate.issueId),
             eq(issues.companyId, candidate.companyId)));
           const [wake] = await tx.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.id, candidate.id),
-            eq(agentWakeupRequests.companyId, candidate.companyId), eq(agentWakeupRequests.status, "deferred_issue_execution"),
+            eq(agentWakeupRequests.companyId, candidate.companyId), noReplayHoldCleared, eq(agentWakeupRequests.status, "deferred_issue_execution"),
             isNull(agentWakeupRequests.runId))).for("update");
           if (!wake || !issue || issue.status !== "in_review" || issue.hiddenAt || issue.assigneeUserId) return;
           const state = parseIssueExecutionState(issue.executionState);
@@ -19718,7 +19743,8 @@ export function heartbeatService(
               queuedCommentIdsFromWakePayload(payload).length || readNonEmptyString(payload.commentId) ||
               ["wakeCommentId", "commentId", "nativeStatusWakeIntentId", "chatRequestId", "externalChatRequestId"]
                 .some(key => readNonEmptyString(context[key]) || readNonEmptyString(payload[key])) ||
-              (readNonEmptyString(context.interactionStatus) && context.interactionStatus !== "pending")) return;
+              ([payload.interactionStatus, context.interactionStatus].some(status =>
+                readNonEmptyString(status) && status !== "pending"))) return;
           const [card] = await tx.select().from(issueThreadInteractions).where(and(
             eq(issueThreadInteractions.id, String(payload.interactionId)), eq(issueThreadInteractions.companyId, issue.companyId),
             eq(issueThreadInteractions.issueId, issue.id), eq(issueThreadInteractions.kind, "ask_user_questions"),
@@ -19745,7 +19771,7 @@ export function heartbeatService(
     const cutoff = await getWorktreeExecutionCutoff();
     const pendingInterrupts = await db.select({ id: agentWakeupRequests.id, companyId: agentWakeupRequests.companyId })
       .from(agentWakeupRequests).innerJoin(companies, eq(companies.id, agentWakeupRequests.companyId))
-      .where(and(eq(agentWakeupRequests.status, "deferred_issue_execution"),
+      .where(and(noReplayHoldCleared, eq(agentWakeupRequests.status, "deferred_issue_execution"),
         eq(companies.status, "active"),
         sql`${agentWakeupRequests.payload}->'queuedCommentInterrupt' is not null`,
         lte(agentWakeupRequests.updatedAt, new Date(Date.now() - 30_000)),
@@ -19768,7 +19794,7 @@ export function heartbeatService(
         sql`${issues.id}::text = ${agentWakeupRequests.payload}->>'issueId'`,
         eq(issues.assigneeAgentId, agentWakeupRequests.agentId)))
       .innerJoin(companies, and(eq(companies.id, issues.companyId), eq(companies.status, "active")))
-      .where(and(eq(agentWakeupRequests.status, "deferred_issue_execution"),
+      .where(and(noReplayHoldCleared, eq(agentWakeupRequests.status, "deferred_issue_execution"),
         isNull(issues.executionRunId),
         or(and(
           sql`jsonb_typeof(${agentWakeupRequests.payload} #> '{_paperclipWakeContext,wakeCommentIds}') = 'array'`,
@@ -19813,6 +19839,7 @@ export function heartbeatService(
       ))
       .innerJoin(companies, eq(companies.id, heartbeatRuns.companyId))
       .where(and(
+        noReplayHoldCleared,
         eq(agentWakeupRequests.status, "deferred_issue_execution"),
         eq(heartbeatRuns.status, "cancelled"),
         eq(heartbeatRuns.runtimeMode, "legacy"),
