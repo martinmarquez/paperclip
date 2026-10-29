@@ -1625,7 +1625,16 @@ intact.
 
 ### Explicit continuation wakes
 
+An agent that reports a blocker owned by itself is already aware of that blocker; recording it does not send an immediate `issue_unblock_requested` wake back to the reporting agent. Board requests and blockers delegated to another agent still notify their owner. Waiting on another issue requires a first-class blocker relation; prose in an unblock descriptor does not create that dependency.
+
+Reporter identity comes from the authenticated agent actor, not an audit run header. A Board request remains a Board request even if it includes `X-Paperclip-Run-Id`; that caller-supplied trace does not authenticate an agent. Local CLI agents that need agent semantics must use their agent credentials.
+
+Wake diagnostics preserve the authenticated agent's own `agentId` even without `company_scope:read`, so it can recognize an existing continuation. Other agents' IDs, run IDs and activity IDs retain their normal redaction. This exception applies only to the authorized issue's `/diagnostics/wakes` response.
+
 Explicit same-owner `issue_resumed` wakes requested during a running turn are
 deferred until that turn releases the issue, rather than merged into the turn
-they are supposed to follow. The existing queue deduplication and dispatch
-admission gates still apply; generic pings keep their coalescing behavior.
+they are supposed to follow. Dispatch admission gates still apply; generic
+pings keep their coalescing behavior. Ordinary wake keys do not guarantee
+single delivery after promotion: do not blindly resend an ambiguous request.
+Confirm the persisted receipt through wake diagnostics; a deferred-looking
+response or the current execution ID alone does not prove a successor exists.

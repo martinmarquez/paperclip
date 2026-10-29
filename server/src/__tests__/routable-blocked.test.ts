@@ -22,6 +22,26 @@ function blockedIssue(input: {
 }
 
 describe("routable blocked notifications", () => {
+  it("does not wake an agent about the blocker it just reported for itself", async () => {
+    const wakeup = vi.fn(async () => undefined);
+    const markNotified = vi.fn(async () => undefined);
+    await expect(deliverAgentUnblockNotification({
+      issue: blockedIssue(), reportingAgentId: agentId, wakeup, markNotified,
+    })).resolves.toBe(false);
+    expect(wakeup).not.toHaveBeenCalled();
+    expect(markNotified).not.toHaveBeenCalled();
+  });
+
+  it("still notifies another agent who can resolve the reported blocker", async () => {
+    const wakeup = vi.fn(async () => undefined);
+    const markNotified = vi.fn(async () => undefined);
+    await expect(deliverAgentUnblockNotification({
+      issue: blockedIssue(), reportingAgentId: "another-agent", wakeup, markNotified,
+    })).resolves.toBe(true);
+    expect(wakeup).toHaveBeenCalledTimes(1);
+    expect(markNotified).toHaveBeenCalledTimes(1);
+  });
+
   it("wakes the named agent and records delivery on a prospective transition", async () => {
     const wakeup = vi.fn(async () => undefined);
     const markNotified = vi.fn(async () => undefined);

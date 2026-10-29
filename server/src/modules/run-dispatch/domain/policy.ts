@@ -146,6 +146,8 @@ export type QueuedRunFacts = {
   /** A connection resolution or tool refresh can resume an agent waiting in review. */
   isConnectionContinuation?: boolean;
   isInteractionWake: boolean;
+  /** Server-verified pending question addressed to this agent; never an approval. */
+  isPendingInteractionAddresseeWake?: boolean;
   isAuthorizedSourceScopedRecovery: boolean;
   isNonAssigneeWorkspaceBusyRetry: boolean;
 
@@ -586,9 +588,12 @@ export function decideQueuedRunStaleness(
     };
   }
 
-  if (facts.retryReasonKind === "native_safe_replacement" && facts.dependenciesBlocked) {
+  if (facts.dependenciesBlocked && (facts.retryReasonKind === "native_safe_replacement" ||
+      (facts.wakeReason === "interaction_pending" && !facts.isPendingInteractionAddresseeWake))) {
     return { stale: true, errorCode: "issue_dependencies_blocked",
-      reason: "Cancelled because issue dependencies became blocked before replacement dispatch",
+      reason: facts.retryReasonKind === "native_safe_replacement"
+        ? "Cancelled because issue dependencies became blocked before replacement dispatch"
+        : "Cancelled because the pending question is unavailable and task dependencies are still blocked",
       details: { issueId: facts.issueId,
         unresolvedBlockerIssueIds: facts.dependenciesBlocked.unresolvedBlockerIssueIds,
         unresolvedBlockerCount: facts.dependenciesBlocked.unresolvedBlockerCount } };
@@ -661,7 +666,7 @@ export function decideQueuedRunStaleness(
   const participantOutcome = decideReviewParticipant({
     ...facts.reviewParticipant,
     runAgentId: facts.runAgentId,
-    bypass: facts.wakeCommentIdPresent,
+    bypass: facts.wakeCommentIdPresent || facts.isPendingInteractionAddresseeWake === true,
   });
   if (participantOutcome === "participant_changed") {
     return {

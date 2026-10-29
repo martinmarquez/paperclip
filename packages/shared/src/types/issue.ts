@@ -267,6 +267,7 @@ export type IssueWakeDiagnosticWakeFailureClass = "failed" | "cancelled" | "skip
 
 export interface IssueWakeDiagnosticWakeRequest {
   kind: "wake_request";
+  /** Own agent identity remains visible without company-scope access. */
   agentId: string | null;
   source: string;
   reason: string | null;

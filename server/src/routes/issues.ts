@@ -1,3 +1,4 @@
+import { hasAssigneeQuestionWait } from "../services/issue-question-wait.js";
 import { setIssueTitle } from "../services/issue-title.js";
 import { setIssueTitleSchema } from "@paperclipai/shared";
 import { resolveConfirmationFromComment } from "../services/confirmation-comment-resolution.js";
@@ -1475,12 +1476,15 @@ function projectIssueWakeRequest(
     finishedAt: Date | string | null;
     error: string | null;
   },
-  options: { includeInternalIds: boolean },
+  options: { includeInternalIds: boolean; actorAgentId?: string },
 ): IssueWakeDiagnosticWakeRequest {
   const status = projectWakeDiagnosticStatus(row.status);
   return {
     kind: "wake_request",
-    agentId: options.includeInternalIds ? row.agentId : null,
+    agentId:
+      options.includeInternalIds || row.agentId === options.actorAgentId
+        ? row.agentId
+        : null,
     source: projectWakeDiagnosticSource(row.source) ?? "other",
     reason: projectWakeDiagnosticReason(row.reason),
     status,
@@ -1709,6 +1713,7 @@ function buildIssueWakeDiagnosticsResponse(input: {
   truncatedWakeRequests: boolean;
   truncatedActivityRecords: boolean;
   includeInternalIds: boolean;
+  actorAgentId?: string;
   maxWakeRequests?: number;
   maxActivityRecords?: number;
   lookbackDays?: number;
@@ -1718,6 +1723,7 @@ function buildIssueWakeDiagnosticsResponse(input: {
     ...input.wakeRequests.map((record) =>
       projectIssueWakeRequest(record, {
         includeInternalIds: input.includeInternalIds,
+        actorAgentId: input.actorAgentId,
       }),
     ),
     ...input.activityRecords.map((record) =>
@@ -8749,6 +8755,7 @@ export function issueRoutes(
       truncatedWakeRequests: wakeDiagnostic.truncatedWakeRequests,
       truncatedActivityRecords: wakeDiagnostic.truncatedActivityRecords,
       includeInternalIds,
+      actorAgentId: req.actor.type === "agent" ? req.actor.agentId : undefined,
     });
 
     logger.info(
@@ -13203,7 +13210,16 @@ export function issueRoutes(
         req.body.executionPolicy !== undefined && monitorChanged,
       );
 
+      const waitingOnOwnQuestion = await hasAssigneeQuestionWait(db, {
+        companyId: existing.companyId, issueId: existing.id,
+        assigneeAgentId: existing.assigneeAgentId,
+        agentId: req.actor.type === "agent" ? actor.agentId : null,
+        runId: req.actor.type === "agent" ? actor.runId : null,
+        requestedStatus: typeof updateFields.status === "string" ? updateFields.status : undefined,
+      });
+
       const transition = applyIssueExecutionPolicyTransition({
+        waitingOnOwnQuestion,
         issue: existing,
         policy: nextExecutionPolicy,
         previousPolicy: previousExecutionPolicy,
@@ -13821,6 +13837,7 @@ export function issueRoutes(
         let ownerNotifiedAt: Date | null = null;
         await deliverAgentUnblockNotification({
           issue: blockedIssue,
+          reportingAgentId: req.actor.type === "agent" ? req.actor.agentId : undefined,
           wakeup: heartbeat.wakeup,
           markNotified: async (blockedOwnerNotifiedAt) => {
             ownerNotifiedAt = blockedOwnerNotifiedAt;
