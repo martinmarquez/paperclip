@@ -31,12 +31,16 @@ export async function validateExecutionReconciliation(input: {
   agentId: string | null;
   sourceRunId: unknown;
   decision: ExecutionReconciliation | undefined;
+  recordOnly?: boolean;
 }) {
   const { db, companyId, issueId, agentId, decision } = input;
   if (!decision || decision.runId !== input.sourceRunId || !agentId) {
     throw conflict(
       "Reconcile the recorded execution and its action outcomes before continuing this task.",
     );
+  }
+  if (input.recordOnly && decision.actionOutcome !== "not_performed") {
+    throw conflict("Recording without continuation requires verified unperformed work.");
   }
   const [run] = await db
     .select()
@@ -63,7 +67,8 @@ export async function validateExecutionReconciliation(input: {
     !run ||
     !task ||
     task.assigneeAgentId !== agentId ||
-    (run.agentId !== agentId && !isCurrentReviewer) ||
+    (run.agentId !== agentId && !isCurrentReviewer &&
+      !(input.recordOnly && decision.actionOutcome === "not_performed")) ||
     (run.nativeIssueId ?? run.contextSnapshot?.issueId) !== issueId ||
     !["failed", "interrupted", "timed_out", "cancelled"].includes(run.status)
   ) {
@@ -120,7 +125,7 @@ export async function validateExecutionReconciliation(input: {
     throw conflict(
       "The previous execution environment has not finished releasing its authority.",
     );
-  await buildExecutionContinuation({
+  if (!input.recordOnly) await buildExecutionContinuation({
     db,
     companyId,
     issueId,
@@ -142,6 +147,7 @@ export async function markExecutionReconciliation(
   decision: ExecutionReconciliation,
   actorId: string,
   deliveryOwner?: { kind: "chat_failed_run_retry"; actionId: string },
+  recordOnly = false,
 ) {
   if (deliveryOwner) {
     const [retry] = await db
@@ -187,7 +193,12 @@ export async function markExecutionReconciliation(
           actorId,
           recordedAt: new Date().toISOString(),
         },
-        continuationDelivery: deliveryOwner ? "delegated" : "pending",
+        ...(recordOnly ? { automaticRecovery: {
+          ...(action.evidence.automaticRecovery as Record<string, unknown>),
+          replay: "verified_without_continuation",
+          actionOutcome: decision.actionOutcome,
+        } } : {}),
+        continuationDelivery: recordOnly ? "not_requested" : deliveryOwner ? "delegated" : "pending",
         ...(deliveryOwner ? { continuationDeliveryOwner: deliveryOwner } : {}),
       },
     })

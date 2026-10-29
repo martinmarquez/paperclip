@@ -9147,7 +9147,9 @@ export function issueRoutes(
         sourceIssueStatus,
         resolutionNote,
         executionReconciliation,
+        recordOnly,
       } = req.body;
+      if (recordOnly) assertBoard(req);
       if (outcome === "false_positive" || outcome === "cancelled") {
         assertBoard(req);
       }
@@ -9199,7 +9201,12 @@ export function issueRoutes(
             );
             const automatic = settled.evidence.automaticRecovery as
               { replay?: string } | undefined;
-            if (automatic?.replay === "blocked" && executionReconciliation) {
+            if (automatic?.replay === "blocked" && executionReconciliation && recordOnly) {
+              if (activeRecoveryAction || settled.status !== "resolved" || settled.outcome !== "blocked") {
+                throw conflict("Another recovery action or an obsolete failure must be resolved before recording this execution.");
+              }
+              activeRecoveryAction = issueRecoveryActionReadModel(settled);
+            } else if (automatic?.replay === "blocked" && executionReconciliation) {
               // An automatic no-replay disposition is final until new evidence
               // arrives. Keep the supported evidence API usable without a dialog.
               assertBoard(req);
@@ -9239,6 +9246,30 @@ export function issueRoutes(
           activeRecoveryAction,
           { source: "recovery_action_resolution" },
         );
+
+        if (recordOnly) {
+          if (sourceIssueStatus !== lockedIssue.status || !executionReconciliation ||
+              !requiresExecutionReconciliation(activeRecoveryAction.cause)) {
+            throw conflict("Recording execution evidence cannot change task status or another recovery cause.");
+          }
+          const blocker = await getExecutionBlocker(tx as unknown as Db, lockedIssue.companyId, lockedIssue.id);
+          if (blocker?.recoveryActionId !== activeRecoveryAction.id) {
+            throw conflict("The recorded execution is no longer the current recovery blocker.");
+          }
+          await validateExecutionReconciliation({
+            db: tx as unknown as Db, companyId: lockedIssue.companyId,
+            issueId: lockedIssue.id, agentId: lockedIssue.assigneeAgentId,
+            sourceRunId: activeRecoveryAction.evidence.runId ?? activeRecoveryAction.evidence.sourceRunId,
+            decision: executionReconciliation, recordOnly: true,
+          });
+          await markExecutionReconciliation(tx as unknown as Db, activeRecoveryAction,
+            executionReconciliation, actor.actorId, undefined, true);
+          const [recoveryAction] = await tx.update(issueRecoveryActions).set({
+            status: "resolved", outcome: "restored", resolutionNote: resolutionNote ?? null,
+            resolvedAt: new Date(), updatedAt: new Date(),
+          }).where(eq(issueRecoveryActions.id, activeRecoveryAction.id)).returning();
+          return { issue: lockedIssue, recoveryAction: recoveryAction!, chatRetry: null };
+        }
 
         if (outcome === "restored" && activeRecoveryAction.cause === "native_workspace_sync_out_unsafe_archive") {
           throw conflict("Unsafe workspace export recovers automatically without another provider turn.", { code: "workspace_export_automatic_recovery" });
@@ -9600,6 +9631,7 @@ export function issueRoutes(
           outcome: result.recoveryAction.outcome,
           sourceIssueStatus: sourceIssueStatus ?? null,
           resolutionNote: result.recoveryAction.resolutionNote,
+          recordOnly: recordOnly ?? false,
         },
       });
 

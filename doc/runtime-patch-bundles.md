@@ -52,3 +52,19 @@ grant/setup card. They do not authorize a provider, issue credentials, or execut
 an external service action. Connection grants, tool policies, company boundaries,
 token expiry, and human provider selection still apply. Other gateways retain
 their approval configuration, including same-name gateways at another origin.
+
+## Record a stopped webhook without retrying it
+
+An operator can record verified unperformed work with the existing
+`POST /api/issues/:id/recovery-actions/resolve` API and `recordOnly: true`.
+Supply the exact `actionId`, `outcome: "restored"`, the task's unchanged
+`sourceIssueStatus`, and `executionReconciliation` with the original `runId`,
+`providerStopped: true`, `actionOutcome: "not_performed"` and observed receipts.
+An HTTP502 or absent logs alone are insufficient evidence of unperformed work.
+
+This board-only operation keeps the task, current assignee, approvals and
+paused agents unchanged. It validates the recorded source, process/controller
+termination and released leases, then settles the no-replay hold without
+creating a continuation or retry. It can record an old reviewer's verified
+outcome after the task was reassigned. Ordinary resumption retains its original
+owner checks. Unknown, completed or mixed outcomes cannot use this operation.
