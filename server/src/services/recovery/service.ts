@@ -1,3 +1,4 @@
+import { issueThreadInteractionAttentionAgentAllowed } from "../issue-thread-interaction-resolution.js";
 import { isAiAuthenticationBlocked } from "../ai-auth-failure.js";
 import { isNativeWorkspaceExportRepairCause } from "@paperclipai/shared";
 import { settleSlackConversation } from "../slack-conversation-lifecycle.js";
@@ -1135,9 +1136,9 @@ export function recoveryService(
     return Boolean(run || deferredWake || nativeRecovery);
   }
 
-  async function hasPendingWakeInteraction(companyId: string, issueId: string) {
+  async function getPendingWakeInteractions(companyId: string, issueId: string) {
     return db
-      .select({ id: issueThreadInteractions.id })
+      .select()
       .from(issueThreadInteractions)
       .where(
         and(
@@ -1150,8 +1151,8 @@ export function recoveryService(
           ]),
         ),
       )
-      .limit(1)
-      .then((rows) => Boolean(rows[0]));
+      .orderBy(asc(issueThreadInteractions.createdAt), asc(issueThreadInteractions.id))
+      .limit(51);
   }
 
   /**
@@ -4534,7 +4535,14 @@ export function recoveryService(
         continue;
       }
 
-      if (await hasPendingWakeInteraction(issue.companyId, issue.id)) {
+      const pendingInteractions = await getPendingWakeInteractions(issue.companyId, issue.id);
+      const reviewerQuestion = pendingExecutionState?.currentStageId && participantAgentId === agentId &&
+        pendingInteractions.length > 0 && pendingInteractions.length <= 50 &&
+        pendingInteractions.every(interaction => interaction.kind === "ask_user_questions" &&
+          interaction.addresseeAgentId === agentId &&
+          issueThreadInteractionAttentionAgentAllowed({ agentId, interaction }))
+        ? pendingInteractions[0] : null;
+      if (pendingInteractions.length && !reviewerQuestion) {
         result.skipped += 1;
         continue;
       }
@@ -4564,7 +4572,51 @@ export function recoveryService(
         continue;
       }
 
-      const participantLatestRunForRecovery =
+      if (reviewerQuestion) {
+        // An addressed question is work for this reviewer, not a human wait.
+        // Recover only its missing initial delivery. Once a run exists, normal
+        // bounded retry/disposition handling owns it; never loop on an answer.
+        const [delivered] = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
+          eq(heartbeatRuns.companyId, issue.companyId), eq(heartbeatRuns.agentId, agentId),
+          sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issue.id}`,
+          sql`${heartbeatRuns.contextSnapshot}->>'interactionId' = ${reviewerQuestion.id}`,
+        )).limit(1);
+        if (!agentInvokable || delivered || await isInvocationBudgetBlocked(issue, agentId)) {
+          result.skipped += 1;
+          continue;
+        }
+        const previous = await getLatestIssueRunForAgent(issue.companyId, issue.id, agentId);
+        if (isOperatorCancelledRun(previous, agentId) || (previous &&
+            (await readChatControlRecoveryStop(db, { companyId: issue.companyId, issueId: issue.id,
+              agentId, sourceRunId: previous.id })).kind !== "clear")) {
+          result.operatorCancelExempted += 1;
+          continue;
+        }
+        const queued = await deps.enqueueWakeup(agentId, {
+          source: "automation", triggerDetail: "system", reason: "interaction_pending",
+          requestedByActorType: "system",
+          payload: { issueId: issue.id, interactionId: reviewerQuestion.id,
+            interactionKind: reviewerQuestion.kind, mutation: "interaction" },
+          contextSnapshot: { issueId: issue.id, taskId: issue.id, interactionId: reviewerQuestion.id,
+            interactionKind: reviewerQuestion.kind, wakeReason: "interaction_pending",
+            source: "issue.interaction.created", currentStageId: pendingExecutionState!.currentStageId },
+          issueStateGuard: { statuses: ["in_review"], assigneeAgentId: issue.assigneeAgentId,
+            executionStageId: pendingExecutionState!.currentStageId ?? undefined },
+          // Existing review-path receipt uniqueness also serializes a worker
+          // that races after the first provider turn has already ended.
+          idempotencyKey: `issue_review_path_lost:question:${issue.id}:${pendingExecutionState!.currentStageId}:${reviewerQuestion.id}`,
+        }).catch(error => {
+          if (isUniqueViolation(error, "agent_wakeup_requests_review_path_recovery_idempotency_uq")) return null;
+          throw error;
+        });
+        if (queued) {
+          result.reviewParticipantRequeued += 1;
+          result.issueIds.push(issue.id);
+        } else result.skipped += 1;
+        continue;
+      }
+
+      const participantHistoryLatestRun =
         issue.status === "in_review" && participantAgentId
           ? await getLatestIssueRunForAgent(
               issue.companyId,
@@ -4572,9 +4624,14 @@ export function recoveryService(
               participantAgentId,
             )
           : null;
+      const participantContext = parseObject(participantHistoryLatestRun?.contextSnapshot);
+      const participantStageId = readNonEmptyString(participantContext.currentStageId) ??
+        readNonEmptyString(parseObject(participantContext.executionStage).stageId);
+      const participantLatestRunForRecovery = participantStageId &&
+        participantStageId !== pendingExecutionState?.currentStageId ? null : participantHistoryLatestRun;
       const executionRecoverySource =
         issue.status === "in_review"
-          ? participantLatestRunForRecovery
+          ? participantHistoryLatestRun
           : latestRun;
       if (
         executionRecoverySource?.agentId === agentId &&

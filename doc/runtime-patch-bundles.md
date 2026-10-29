@@ -99,3 +99,12 @@ within the backup directory only after compression and provider completion.
 An interrupted write cannot appear as a new completed `.sql.gz` archive to the
 health check or scheduler. Failure cleanup removes the temporary output; old
 verified backups keep their normal retention policy.
+
+A pending question addressed to the current reviewer is actionable work for that
+reviewer. Assigned-issue recovery redelivers its missing first notification with
+the original interaction context, even when the reviewer has unrelated old run
+history. It neither answers the question nor changes its resolver. Human and
+governed confirmation waits, Stops, pauses, budgets and unknown-action holds
+still block dispatch. An existing run for that exact question owns its bounded
+retry lifecycle; recovery cannot repeatedly start new turns for an unanswered
+card. The existing review-path receipt constraint protects concurrent delivery.

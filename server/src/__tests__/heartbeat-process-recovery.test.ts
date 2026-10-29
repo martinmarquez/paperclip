@@ -9434,6 +9434,81 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     return fixture;
   }
 
+  async function seedPendingReviewerQuestion(target: "agent" | "human" | "confirmation" = "agent") {
+    const fixture = await seedInReviewParticipantRunFixture();
+    await db.update(issues).set({ executionRunId: null, executionAgentNameKey: null, executionLockedAt: null })
+      .where(eq(issues.id, fixture.issueId));
+    await db.update(heartbeatRuns).set({ status: "cancelled", errorCode: "issue_reassigned", finishedAt: new Date(),
+      contextSnapshot: { issueId: fixture.issueId, wakeReason: "issue_blockers_resolved" },
+      resultJson: { conversationContinuation: "continue_conversation_v1", executionCancellation: { state: "acknowledged" } } })
+      .where(eq(heartbeatRuns.id, fixture.runId));
+    await db.update(agentWakeupRequests).set({ status: "cancelled", finishedAt: new Date() })
+      .where(eq(agentWakeupRequests.id, fixture.wakeupRequestId));
+    const interactionId = randomUUID();
+    await db.insert(issueThreadInteractions).values({ id: interactionId, companyId: fixture.companyId, issueId: fixture.issueId,
+      kind: target === "confirmation" ? "request_confirmation" : "ask_user_questions", status: "pending",
+      continuationPolicy: "wake_assignee", createdByUserId: "responsible-user",
+      addresseeAgentId: target === "human" ? null : fixture.agentId,
+      addresseeUserId: target === "human" ? "responsible-user" : null,
+      requestedResolverPolicy: "anyone", effectiveResolverPolicy: "anyone", resolverPolicyProvenance: "inherited",
+      payload: { version: 1, questions: [{ id: "posture", prompt: "Review the recorded evidence", selectionMode: "single",
+        required: true, allowOther: true, options: [{ id: "text", label: "Type an answer", freeText: true }] }] } });
+    return { ...fixture, interactionId };
+  }
+
+  it("redelivers a reviewer's pending question once despite unrelated cancelled run history", async () => {
+    const { agentId, issueId, runId, stageId, interactionId } = await seedPendingReviewerQuestion();
+    const heartbeat = heartbeatService(db);
+    await Promise.all([heartbeat.reconcileStrandedAssignedIssues(), heartbeat.reconcileStrandedAssignedIssues()]);
+    await heartbeatService(db).reconcileStrandedAssignedIssues();
+    const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId));
+    const deliveries = runs.filter(run => run.contextSnapshot?.interactionId === interactionId);
+    expect(deliveries).toHaveLength(1);
+    expect(deliveries[0]!.contextSnapshot).toMatchObject({ issueId, currentStageId: stageId,
+      interactionId, wakeReason: "interaction_pending", source: "issue.interaction.created" });
+    expect(runs.find(run => run.id === runId)).toMatchObject({ status: "cancelled", errorCode: "issue_reassigned" });
+    expect((await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.id, interactionId)))[0]!.status).toBe("pending");
+  });
+
+  it("starts the current stage instead of retrying an older known stage for the same reviewer", async () => {
+    const { agentId, issueId, runId, stageId, interactionId } = await seedPendingReviewerQuestion();
+    await db.update(issueThreadInteractions).set({ status: "cancelled" }).where(eq(issueThreadInteractions.id, interactionId));
+    await db.update(heartbeatRuns).set({ contextSnapshot: { issueId, currentStageId: randomUUID(),
+      wakeReason: "execution_review_requested" } }).where(eq(heartbeatRuns.id, runId));
+    expect((await heartbeatService(db).reconcileStrandedAssignedIssues()).reviewParticipantRequeued).toBe(1);
+    const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId));
+    expect(runs).toHaveLength(2);
+    expect(runs.find(run => run.id !== runId)).toMatchObject({ retryOfRunId: null,
+      contextSnapshot: { currentStageId: stageId, source: "issue.execution_review_initial_recovery" } });
+  });
+
+  it.each(["human", "confirmation"] as const)("keeps a pending %s wait behind its original resolver", async target => {
+    const { agentId } = await seedPendingReviewerQuestion(target);
+    expect((await heartbeatService(db).reconcileStrandedAssignedIssues()).reviewParticipantRequeued).toBe(0);
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId))).toHaveLength(1);
+  });
+
+  it("does not repeatedly dispatch an unanswered question that already had a provider run", async () => {
+    const { agentId, issueId, runId, interactionId } = await seedPendingReviewerQuestion();
+    await db.update(heartbeatRuns).set({ status: "succeeded", contextSnapshot: { issueId, interactionId } })
+      .where(eq(heartbeatRuns.id, runId));
+    expect((await heartbeatService(db).reconcileStrandedAssignedIssues()).reviewParticipantRequeued).toBe(0);
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId))).toHaveLength(1);
+  });
+
+  it.each(["pause", "unknown", "stop"] as const)("does not redeliver an addressed review question through a %s hold", async gate => {
+    const { companyId, agentId, issueId, runId } = await seedPendingReviewerQuestion();
+    if (gate === "pause") await db.insert(issueTreeHolds).values({ companyId, rootIssueId: issueId, mode: "pause",
+      status: "active", reason: "Manual pause", releasePolicy: { strategy: "manual" } });
+    else if (gate === "stop") await db.update(heartbeatRuns).set({ resultJson: { cancelledByActorType: "user" } })
+      .where(eq(heartbeatRuns.id, runId));
+    else await db.insert(issueRecoveryActions).values({ companyId, sourceIssueId: issueId, kind: "execution_reconciliation",
+      status: "active", ownerType: "board", cause: "unknown_action_outcome", fingerprint: `unknown:${issueId}`,
+      evidence: {}, nextAction: "Reconcile the previous action" });
+    expect((await heartbeatService(db).reconcileStrandedAssignedIssues()).reviewParticipantRequeued).toBe(0);
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId))).toHaveLength(1);
+  });
+
   it.each(["review", "approval"] as const)("recovers the first %s dispatch after a skipped handoff exactly once", async stageType => {
     const { agentId, issueId, stageId } = await seedFirstReviewHandoff(stageType);
     const heartbeat = heartbeatService(db);
