@@ -622,7 +622,7 @@ describeEmbeddedPostgres("run-dispatch postgres adapter", () => {
         effectiveResolverPolicy: "policy" in testCase ? testCase.policy : "anyone",
         addresseeAgentId: "wrongAddressee" in testCase ? ownerId : agentId,
         createdByAgentId: ownerId,
-        payload: { version: 1, questions: [{ id: "scope", prompt: "Which scope?", selectionMode: "single", options: [] }] },
+        payload: { version: 1, questions: [{ id: "scope", prompt: "Which scope?", selectionMode: "single", options: [{ id: "continue", label: "Continue" }] }] },
       });
       const runId = await seedRun({ companyId, agentId, contextSnapshot: {
         issueId, interactionId: "malformed" in testCase ? "not-a-uuid" : interactionId, source: "issue.interaction.created",

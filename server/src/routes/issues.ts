@@ -1,3 +1,4 @@
+import { hasAssigneeQuestionWait } from "../services/issue-question-wait.js";
 import { setIssueTitle } from "../services/issue-title.js";
 import { setIssueTitleSchema } from "@paperclipai/shared";
 import { resolveConfirmationFromComment } from "../services/confirmation-comment-resolution.js";
@@ -13209,7 +13210,16 @@ export function issueRoutes(
         req.body.executionPolicy !== undefined && monitorChanged,
       );
 
+      const waitingOnOwnQuestion = await hasAssigneeQuestionWait(db, {
+        companyId: existing.companyId, issueId: existing.id,
+        assigneeAgentId: existing.assigneeAgentId,
+        agentId: req.actor.type === "agent" ? actor.agentId : null,
+        runId: req.actor.type === "agent" ? actor.runId : null,
+        requestedStatus: typeof updateFields.status === "string" ? updateFields.status : undefined,
+      });
+
       const transition = applyIssueExecutionPolicyTransition({
+        waitingOnOwnQuestion,
         issue: existing,
         policy: nextExecutionPolicy,
         previousPolicy: previousExecutionPolicy,
