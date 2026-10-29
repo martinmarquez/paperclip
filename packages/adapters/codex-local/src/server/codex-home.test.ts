@@ -1056,7 +1056,7 @@ describe("evaluateCodexCredentialReadiness", () => {
     try {
       await fs.writeFile(path.join(root, "config.toml"), '[mcp_servers."paperclip-connections"]\nurl = "https://unmanaged.example"\n');
       await writeManagedCodexMcpConfig({ codexHome: root, apiBaseUrl: "https://paperclip.example", gateways: [
-        { name: "Paperclip connections", endpointPath: "/api/mcp/runtime-tools", bearerToken: "run-token" },
+        { name: "Paperclip connections", endpointPath: "/mcp/runtime-tools", bearerToken: "run-token" },
         { name: "Neon", endpointPath: "/api/tool-gateway/neon/mcp", bearerToken: "neon-token" },
       ] });
       const config = await fs.readFile(path.join(root, "config.toml"), "utf8");
@@ -1072,10 +1072,11 @@ describe("evaluateCodexCredentialReadiness", () => {
   });
 
   it.each([
-    ["Paperclip connections", "https://foreign.example/api/mcp/runtime-tools"],
+    ["Paperclip connections", "https://foreign.example/mcp/runtime-tools"],
+    ["Paperclip connections", "/api/mcp/runtime-tools"],
     ["Paperclip connections", "/api/tool-gateway/other/mcp"],
-    ["Paperclip connections", "/api/mcp/runtime-tools?other=true"],
-    ["Other gateway", "/api/mcp/runtime-tools"],
+    ["Paperclip connections", "/mcp/runtime-tools?other=true"],
+    ["Other gateway", "/mcp/runtime-tools"],
   ])("does not preapprove lookalike gateways: %s %s", async (name, endpointPath) => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-lookalike-"));
     try {

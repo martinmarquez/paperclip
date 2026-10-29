@@ -46,7 +46,7 @@ duplicate pipeline or move builds onto an operator's Mac.
 ## Headless connection discovery
 
 The Codex adapter preapproves only `connections_search` and `connection_request`
-on the same-origin, run-scoped `/api/mcp/runtime-tools` gateway named
+on the same-origin, run-scoped `/mcp/runtime-tools` gateway named
 `Paperclip connections`. These tools return available access or create the human
 grant/setup card. They do not authorize a provider, issue credentials, or execute
 an external service action. Connection grants, tool policies, company boundaries,
