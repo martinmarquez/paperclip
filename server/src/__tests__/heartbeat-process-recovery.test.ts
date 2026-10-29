@@ -9470,6 +9470,27 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect((await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.id, interactionId)))[0]!.status).toBe("pending");
   });
 
+  it("keeps a reviewer question recoverable across predecessor lease cleanup", async () => {
+    const { companyId, agentId, issueId, runId, interactionId } = await seedPendingReviewerQuestion();
+    const [lease] = await db.insert(environmentLeases).values({ companyId, issueId, heartbeatRunId: runId,
+      status: "active" }).returning();
+    const heartbeat = heartbeatService(db);
+    expect((await heartbeat.reconcileStrandedAssignedIssues()).reviewParticipantRequeued).toBe(0);
+    expect((await heartbeat.reconcileStrandedAssignedIssues()).reviewParticipantRequeued).toBe(0);
+    const waiting = await db.select().from(agentWakeupRequests).where(and(
+      eq(agentWakeupRequests.companyId, companyId),
+      sql`${agentWakeupRequests.payload}->>'interactionId' = ${interactionId}`));
+    expect(waiting).toHaveLength(1);
+    expect(waiting[0]!.status).toBe("skipped");
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId))).toHaveLength(1);
+    await db.update(environmentLeases).set({ status: "released", releasedAt: new Date() })
+      .where(eq(environmentLeases.id, lease!.id));
+    expect((await heartbeatService(db).reconcileStrandedAssignedIssues()).reviewParticipantRequeued).toBe(1);
+    const deliveries = (await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId)))
+      .filter(run => run.contextSnapshot?.interactionId === interactionId);
+    expect(deliveries).toHaveLength(1);
+  });
+
   it("starts the current stage instead of retrying an older known stage for the same reviewer", async () => {
     const { agentId, issueId, runId, stageId, interactionId } = await seedPendingReviewerQuestion();
     await db.update(issueThreadInteractions).set({ status: "cancelled" }).where(eq(issueThreadInteractions.id, interactionId));

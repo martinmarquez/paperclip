@@ -27767,6 +27767,8 @@ export function heartbeatService(
               executionWorkspacePreference: issues.executionWorkspacePreference,
               executionWorkspaceSettings: issues.executionWorkspaceSettings,
               assigneeAgentId: issues.assigneeAgentId,
+              assigneeUserId: issues.assigneeUserId,
+              hiddenAt: issues.hiddenAt,
               executionRunId: issues.executionRunId,
               executionAgentNameKey: issues.executionAgentNameKey,
               createdAt: issues.createdAt,
@@ -27938,9 +27940,23 @@ export function heartbeatService(
               }).where(eq(agentWakeupRequests.id, executionWaitRequestId));
               return { kind: "deferred" as const };
             }
-            if (durableRequest || wakeCommentId ||
+            // The pending card is already durable intent. Saving its initial
+            // reviewer notification as live deferred execution would hide it
+            // from assigned-issue recovery after this lease is released.
+            const reviewState = parseIssueExecutionState(issue.executionState);
+            const pendingReviewQuestion = issue.status === "in_review" && !issue.assigneeUserId && !issue.hiddenAt &&
+              !durableRequest && !wakeCommentId && queuedCommentIdsFromRunContext(enrichedContextSnapshot).length === 0 &&
+              !readNonEmptyString(enrichedContextSnapshot.nativeStatusWakeIntentId) &&
+              reviewState?.status === "pending" && reviewState.currentStageId &&
+              reviewState.currentParticipant?.type === "agent" &&
+              reviewState.currentParticipant.agentId === agentId &&
+              await hasPendingQuestionAddresseeWake(tx as unknown as Db, {
+                companyId: issue.companyId, issueId: issue.id, agentId,
+                contextSnapshot: enrichedContextSnapshot,
+              });
+            if (!pendingReviewQuestion && (durableRequest || wakeCommentId ||
                 hasInteractionContinuationWakeContext(enrichedContextSnapshot) ||
-                readNonEmptyString(enrichedContextSnapshot.nativeStatusWakeIntentId)) {
+                readNonEmptyString(enrichedContextSnapshot.nativeStatusWakeIntentId))) {
               await tx.insert(agentWakeupRequests).values({
                 ...durableReceiptFields,
                 companyId: agent.companyId, agentId, source, triggerDetail, reason,
@@ -27960,7 +27976,7 @@ export function heartbeatService(
               });
             } else {
               await recordExecutionWait(tx as unknown as Db, {
-                issueId: issue.id, condition, coalesce: coalesceExecutionWait,
+                issueId: issue.id, condition, coalesce: coalesceExecutionWait || Boolean(pendingReviewQuestion),
                 request: {
                   ...durableReceiptFields,
                   companyId: agent.companyId, agentId, source, triggerDetail,

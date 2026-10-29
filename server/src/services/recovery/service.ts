@@ -1136,6 +1136,26 @@ export function recoveryService(
     return Boolean(run || deferredWake || nativeRecovery);
   }
 
+  async function hasPendingWakeInteraction(companyId: string, issueId: string) {
+    return db
+      .select({ id: issueThreadInteractions.id })
+      .from(issueThreadInteractions)
+      .where(
+        and(
+          eq(issueThreadInteractions.companyId, companyId),
+          eq(issueThreadInteractions.issueId, issueId),
+          eq(issueThreadInteractions.status, "pending"),
+          inArray(issueThreadInteractions.continuationPolicy, [
+            "wake_assignee",
+            "wake_assignee_on_accept",
+          ]),
+        ),
+      )
+      .limit(1)
+      .then((rows) => Boolean(rows[0]));
+  }
+
+
   async function getPendingWakeInteractions(companyId: string, issueId: string) {
     return db
       .select()
@@ -4596,10 +4616,14 @@ export function recoveryService(
           source: "automation", triggerDetail: "system", reason: "interaction_pending",
           requestedByActorType: "system",
           payload: { issueId: issue.id, interactionId: reviewerQuestion.id,
-            interactionKind: reviewerQuestion.kind, mutation: "interaction" },
+            interactionKind: reviewerQuestion.kind, mutation: "interaction",
+            sourceRunId: reviewerQuestion.sourceRunId ?? null, sourceCommentId: reviewerQuestion.sourceCommentId ?? null },
           contextSnapshot: { issueId: issue.id, taskId: issue.id, interactionId: reviewerQuestion.id,
             interactionKind: reviewerQuestion.kind, wakeReason: "interaction_pending",
-            source: "issue.interaction.created", currentStageId: pendingExecutionState!.currentStageId },
+            source: "issue.interaction.created", currentStageId: pendingExecutionState!.currentStageId,
+            currentStageType: pendingExecutionState!.currentStageType,
+            sourceRunId: reviewerQuestion.sourceRunId ?? null, sourceCommentId: reviewerQuestion.sourceCommentId ?? null,
+            reviewRecoveryInstruction: "Respond to the addressed question and submit the current review-stage decision, or report the exact blocking condition." },
           issueStateGuard: { statuses: ["in_review"], assigneeAgentId: issue.assigneeAgentId,
             executionStageId: pendingExecutionState!.currentStageId ?? undefined },
           // Existing review-path receipt uniqueness also serializes a worker

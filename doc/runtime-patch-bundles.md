@@ -108,3 +108,8 @@ governed confirmation waits, Stops, pauses, budgets and unknown-action holds
 still block dispatch. An existing run for that exact question owns its bounded
 retry lifecycle; recovery cannot repeatedly start new turns for an unanswered
 card. The existing review-path receipt constraint protects concurrent delivery.
+
+If its predecessor still owns a process or lease, the initial reviewer-question
+notification remains a coalesced diagnostic wait. Its durable question card is
+the pending intent; a misleading live execution receipt cannot hide it from
+recovery. Normal admission rechecks ownership before the eventual dispatch.
