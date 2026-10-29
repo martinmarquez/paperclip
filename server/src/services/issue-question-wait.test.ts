@@ -8,6 +8,12 @@ import { hasAssigneeQuestionWait } from "./issue-question-wait.js";
 const support = await getEmbeddedPostgresTestSupport();
 const describePostgres = support.supported ? describe : describe.skip;
 
+interface QuestionWaitCase {
+  name: string; expected: boolean; status?: string; kind?: string; continuationPolicy?: string;
+  otherCompany?: true; noQuestion?: true; otherCreator?: true; otherRun?: true; otherIssue?: true;
+  board?: true; nonAssignee?: true; done?: true; missingRun?: true;
+}
+
 describePostgres("assignee question wait evidence", () => {
   let db: ReturnType<typeof createDb>;
   let temp: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>;
@@ -32,7 +38,7 @@ describePostgres("assignee question wait evidence", () => {
     { name: "non-assignee", expected: false, nonAssignee: true },
     { name: "Done request", expected: false, done: true },
     { name: "missing source run", expected: false, missingRun: true },
-  ] as const)("$name", async (testCase) => {
+  ] as const)("$name", async (testCase: QuestionWaitCase) => {
     const companyId = randomUUID(), agentId = randomUUID(), otherId = randomUUID();
     const issueId = randomUUID(), otherIssueId = randomUUID(), runId = randomUUID(), otherRunId = randomUUID();
     await db.insert(companies).values({ id: companyId, name: "Question fixture", issuePrefix: `Q${companyId.slice(0, 6)}`, requireBoardApprovalForNewAgents: false });
@@ -41,8 +47,8 @@ describePostgres("assignee question wait evidence", () => {
     await db.insert(heartbeatRuns).values([runId, otherRunId].map((id) => ({ id, companyId, agentId, status: "running" })));
     const payload: AskUserQuestionsPayload = { version: 1, questions: [{ id: "scope", prompt: "Which scope?", selectionMode: "single", options: [{ id: "continue", label: "Continue" }] }] };
     if (!("noQuestion" in testCase)) await db.insert(issueThreadInteractions).values({ companyId, issueId: "otherIssue" in testCase ? otherIssueId : issueId,
-      kind: "kind" in testCase ? testCase.kind : "ask_user_questions", status: "status" in testCase ? testCase.status : "pending",
-      continuationPolicy: "continuationPolicy" in testCase ? testCase.continuationPolicy : "wake_assignee",
+      kind: testCase.kind ?? "ask_user_questions", status: testCase.status ?? "pending",
+      continuationPolicy: testCase.continuationPolicy ?? "wake_assignee",
       createdByAgentId: "otherCreator" in testCase ? otherId : agentId, sourceRunId: "otherRun" in testCase ? otherRunId : runId,
       payload,
     });

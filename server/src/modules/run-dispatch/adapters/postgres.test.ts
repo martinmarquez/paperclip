@@ -17,7 +17,7 @@ import {
   issueTreeHolds,
   issues,
 } from "@paperclipai/db";
-import { ISSUE_CONTINUATION_SUMMARY_DOCUMENT_KEY, type AskUserQuestionsPayload } from "@paperclipai/shared";
+import { ISSUE_CONTINUATION_SUMMARY_DOCUMENT_KEY, type AskUserQuestionsPayload, type IssueThreadInteractionCanonicalResolverPolicy } from "@paperclipai/shared";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -600,7 +600,12 @@ describeEmbeddedPostgres("run-dispatch postgres adapter", () => {
       { name: "missing interaction", allowed: false, missing: true },
       { name: "malformed interaction ID", allowed: false, malformed: true },
       { name: "concurrent question supersession", allowed: false, race: true },
-    ] as const)("validates persisted authority for $name", async (testCase) => {
+    ] as const)("validates persisted authority for $name", async (testCase: {
+      name: string; allowed: boolean; kind?: string; status?: string; reason?: string;
+      policy?: IssueThreadInteractionCanonicalResolverPolicy;
+      inReview?: true; terminal?: true; wrongAddressee?: true; wrongIssue?: true;
+      missing?: true; malformed?: true; race?: true;
+    }) => {
       const { companyId, agentId } = await seedCompanyAndAgent();
       const ownerId = randomUUID();
       await seedAgent({ id: ownerId, companyId, name: "Implementation owner" });
@@ -618,9 +623,9 @@ describeEmbeddedPostgres("run-dispatch postgres adapter", () => {
       const payload: AskUserQuestionsPayload = { version: 1, questions: [{ id: "scope", prompt: "Which scope?", selectionMode: "single", options: [{ id: "continue", label: "Continue" }] }] };
       if (!("missing" in testCase)) await db.insert(issueThreadInteractions).values({
         id: interactionId, companyId, issueId: "wrongIssue" in testCase ? otherIssueId : issueId,
-        kind: "kind" in testCase ? testCase.kind : "ask_user_questions",
-        status: "status" in testCase ? testCase.status : "pending",
-        effectiveResolverPolicy: "policy" in testCase ? testCase.policy : "anyone",
+        kind: testCase.kind ?? "ask_user_questions",
+        status: testCase.status ?? "pending",
+        effectiveResolverPolicy: testCase.policy ?? "anyone",
         addresseeAgentId: "wrongAddressee" in testCase ? ownerId : agentId,
         createdByAgentId: ownerId,
         payload,
