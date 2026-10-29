@@ -100,6 +100,8 @@ An interrupted write cannot appear as a new completed `.sql.gz` archive to the
 health check or scheduler. Failure cleanup removes the temporary output; old
 verified backups keep their normal retention policy.
 
+## Recover saved reviewer questions
+
 A pending question addressed to the current reviewer is actionable work for that
 reviewer. Assigned-issue recovery redelivers its missing first notification with
 the original interaction context, even when the reviewer has unrelated old run
@@ -119,3 +121,11 @@ an existing delivery run. An older unanswered card cannot starve a newer missing
 notification. Operator Stops deliberately remain effective across automatic
 stage changes; stage filtering changes retry ownership, not permission to
 ignore a Stop or unresolved control record. Explicit resume remains required.
+
+The existing queue sweep also reclassifies recognizable legacy notification-only
+receipts left as `deferred_issue_execution` before this change. It locks the task,
+receipt and question, checks the current review participant and resolver policy,
+and keeps the question or answer intact. Saved comments, manual wakes, governed
+confirmations and unverified notification contexts retain their receipts.
+Reclassification grants no execution authority: normal admission still owns all
+process/lease, Stop, pause, budget and outcome checks before redelivery.

@@ -9491,6 +9491,64 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(deliveries).toHaveLength(1);
   });
 
+  async function seedLegacyReviewerNotification(input: "agent" | "human" | "confirmation" = "agent", reason = "interaction_pending") {
+    const fixture = await seedPendingReviewerQuestion(input);
+    const queueId = randomUUID();
+    const kind = input === "confirmation" ? "request_confirmation" : "ask_user_questions";
+    await db.insert(agentWakeupRequests).values({ id: queueId, companyId: fixture.companyId, agentId: fixture.agentId,
+      source: "automation", reason, status: "deferred_issue_execution", runId: null,
+      requestedByActorType: "user", requestedByActorId: "responsible-user", updatedAt: new Date(0),
+      payload: { issueId: fixture.issueId, interactionId: fixture.interactionId, interactionKind: kind, mutation: "interaction",
+        executionWait: { reason: "execution_recovery" }, _paperclipWakeContext: { issueId: fixture.issueId,
+          taskId: fixture.issueId, interactionId: fixture.interactionId, interactionKind: kind,
+          source: "issue.interaction.created", wakeReason: "interaction_pending" } } });
+    return { ...fixture, queueId };
+  }
+
+  it.each([false, true])("recovers a legacy deferred question after the lock was cleared (lease held: %s)", async held => {
+    const { companyId, agentId, issueId, runId, interactionId, queueId } = await seedLegacyReviewerNotification(
+      "agent", held ? "issue_execution_deferred" : "interaction_pending");
+    const [lease] = held ? await db.insert(environmentLeases).values({ companyId, issueId,
+      heartbeatRunId: runId, status: "active" }).returning() : [];
+    const heartbeat = heartbeatService(db);
+    await heartbeat.resumeQueuedRuns();
+    const [old] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, queueId));
+    expect(old).toMatchObject({ status: "skipped", runId: null, payload: { interactionId } });
+    if (held) {
+      expect((await heartbeat.reconcileStrandedAssignedIssues()).reviewParticipantRequeued).toBe(0);
+      await db.update(environmentLeases).set({ status: "released", releasedAt: new Date() })
+        .where(eq(environmentLeases.id, lease!.id));
+    }
+    expect((await heartbeatService(db).reconcileStrandedAssignedIssues()).reviewParticipantRequeued).toBe(1);
+    const deliveries = (await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId)))
+      .filter(run => run.contextSnapshot?.interactionId === interactionId);
+    expect(deliveries).toHaveLength(1);
+  });
+
+  it.each(["comment", "confirmation", "restricted"] as const)("preserves a legacy %s receipt instead of retiring its authority", async mode => {
+    const { companyId, agentId, issueId, interactionId, queueId } =
+      await seedLegacyReviewerNotification(mode === "confirmation" ? "confirmation" : "agent");
+    await db.update(agents).set({ status: "paused" }).where(eq(agents.id, agentId));
+    if (mode === "comment") {
+      const commentId = randomUUID();
+      await db.insert(issueComments).values({ id: commentId, companyId, issueId,
+        authorUserId: "responsible-user", body: "Keep this saved input until I resume the agent." });
+      const [wake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, queueId));
+      const context = (wake!.payload!._paperclipWakeContext ?? {}) as Record<string, unknown>;
+      await db.update(agentWakeupRequests).set({ payload: { ...wake!.payload, commentId,
+        _paperclipWakeContext: { ...context, wakeCommentId: commentId, wakeCommentIds: [commentId] } } })
+        .where(eq(agentWakeupRequests.id, queueId));
+    }
+    if (mode === "restricted") await db.update(issueThreadInteractions)
+      .set({ requestedResolverPolicy: "human_only", effectiveResolverPolicy: "human_only" })
+      .where(eq(issueThreadInteractions.id, interactionId));
+    await heartbeatService(db).resumeQueuedRuns();
+    const [wake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, queueId));
+    expect(wake!.status).toBe("deferred_issue_execution");
+    expect(wake!.payload?.interactionId).toBe(interactionId);
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId))).toHaveLength(1);
+  });
+
   it("starts the current stage instead of retrying an older known stage for the same reviewer", async () => {
     const { agentId, issueId, runId, stageId, interactionId } = await seedPendingReviewerQuestion();
     await db.update(issueThreadInteractions).set({ status: "cancelled" }).where(eq(issueThreadInteractions.id, interactionId));

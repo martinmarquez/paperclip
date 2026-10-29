@@ -19671,6 +19671,74 @@ export function heartbeatService(
     return { reaped: reaped.length, runIds: reaped };
   }
 
+  async function retireLegacyReviewerQuestionNotifications(cutoff: Date | null) {
+    const candidates = await db.select({ id: agentWakeupRequests.id, companyId: agentWakeupRequests.companyId,
+      issueId: issues.id }).from(agentWakeupRequests)
+      .innerJoin(issues, and(eq(issues.companyId, agentWakeupRequests.companyId),
+        sql`${issues.id}::text = ${agentWakeupRequests.payload}->>'issueId'`,
+        eq(issues.status, "in_review"), isNull(issues.hiddenAt), isNull(issues.assigneeUserId),
+        sql`${issues.executionState}->'currentParticipant'->>'agentId' = ${agentWakeupRequests.agentId}::text`))
+      .innerJoin(issueThreadInteractions, and(eq(issueThreadInteractions.companyId, issues.companyId),
+        eq(issueThreadInteractions.issueId, issues.id), eq(issueThreadInteractions.kind, "ask_user_questions"),
+        eq(issueThreadInteractions.addresseeAgentId, agentWakeupRequests.agentId),
+        sql`${issueThreadInteractions.id}::text = ${agentWakeupRequests.payload}->>'interactionId'`))
+      .innerJoin(companies, and(eq(companies.id, issues.companyId), eq(companies.status, "active")))
+      .where(and(eq(agentWakeupRequests.status, "deferred_issue_execution"), isNull(agentWakeupRequests.runId),
+        eq(agentWakeupRequests.source, "automation"),
+        sql`${agentWakeupRequests.payload} #>> '{_paperclipWakeContext,source}' = 'issue.interaction.created'`,
+        sql`${agentWakeupRequests.payload} #>> '{_paperclipWakeContext,wakeReason}' = 'interaction_pending'`,
+        sql`coalesce(${agentWakeupRequests.payload} #> '{_paperclipWakeContext,wakeCommentIds}', '[]'::jsonb) = '[]'::jsonb`,
+        sql`coalesce(${agentWakeupRequests.payload}->>'commentId', '') = ''`,
+        sql`coalesce(${agentWakeupRequests.payload} #>> '{_paperclipWakeContext,wakeCommentId}', '') = ''`,
+        sql`coalesce(${agentWakeupRequests.payload} #>> '{_paperclipWakeContext,commentId}', '') = ''`,
+        sql`${agentWakeupRequests.payload}->'queuedCommentInterrupt' is null`,
+        sql`coalesce(${agentWakeupRequests.payload}->>'manualUserWake', 'false') <> 'true'`,
+        sql`coalesce(${agentWakeupRequests.payload} #>> '{_paperclipWakeContext,nativeStatusWakeIntentId}', '') = ''`,
+        lte(agentWakeupRequests.updatedAt, new Date(Date.now() - 30_000)),
+        cutoff ? gte(agentWakeupRequests.requestedAt, cutoff) : undefined))
+      .orderBy(asc(agentWakeupRequests.updatedAt)).limit(50);
+    for (const candidate of candidates) {
+      try {
+        await db.transaction(async tx => {
+          await tx.execute(sql`select id from issues where id = ${candidate.issueId} and company_id = ${candidate.companyId} for update`);
+          const [issue] = await tx.select().from(issues).where(and(eq(issues.id, candidate.issueId),
+            eq(issues.companyId, candidate.companyId)));
+          const [wake] = await tx.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.id, candidate.id),
+            eq(agentWakeupRequests.companyId, candidate.companyId), eq(agentWakeupRequests.status, "deferred_issue_execution"),
+            isNull(agentWakeupRequests.runId))).for("update");
+          if (!wake || !issue || issue.status !== "in_review" || issue.hiddenAt || issue.assigneeUserId) return;
+          const state = parseIssueExecutionState(issue.executionState);
+          const payload = parseObject(wake.payload), context = parseObject(payload[DEFERRED_WAKE_CONTEXT_KEY]);
+          if (state?.status !== "pending" || !state.currentStageId || state.currentParticipant?.type !== "agent" ||
+              state.currentParticipant.agentId !== wake.agentId || wake.source !== "automation" ||
+              !isUuidLike(String(payload.interactionId ?? "")) || payload.interactionKind !== "ask_user_questions" ||
+              context.interactionKind !== "ask_user_questions" || payload.issueId !== issue.id || context.source !== "issue.interaction.created" ||
+              context.wakeReason !== "interaction_pending" || payload.mutation !== "interaction" ||
+              payload.interactionId !== context.interactionId || payload.queuedCommentInterrupt || payload.manualUserWake ||
+              queuedCommentIdsFromWakePayload(payload).length || readNonEmptyString(payload.commentId) ||
+              ["wakeCommentId", "commentId", "nativeStatusWakeIntentId", "chatRequestId", "externalChatRequestId"]
+                .some(key => readNonEmptyString(context[key]) || readNonEmptyString(payload[key])) ||
+              (readNonEmptyString(context.interactionStatus) && context.interactionStatus !== "pending")) return;
+          const [card] = await tx.select().from(issueThreadInteractions).where(and(
+            eq(issueThreadInteractions.id, String(payload.interactionId)), eq(issueThreadInteractions.companyId, issue.companyId),
+            eq(issueThreadInteractions.issueId, issue.id), eq(issueThreadInteractions.kind, "ask_user_questions"),
+            eq(issueThreadInteractions.addresseeAgentId, wake.agentId))).for("update");
+          if (!card) return;
+          // Rotate a policy-blocked card without granting attention authority.
+          const eligible = card.status !== "pending" || await hasPendingQuestionAddresseeWake(tx as unknown as Db, {
+            companyId: issue.companyId, issueId: issue.id, agentId: wake.agentId, contextSnapshot: context,
+          });
+          await tx.update(agentWakeupRequests).set(eligible ? { status: "skipped", finishedAt: new Date(),
+            updatedAt: new Date(), error: "Question saved. The reviewer will continue when the task is ready." }
+            : { updatedAt: new Date() }).where(and(eq(agentWakeupRequests.id, wake.id),
+              eq(agentWakeupRequests.companyId, wake.companyId), eq(agentWakeupRequests.status, "deferred_issue_execution")));
+        });
+      } catch (err) {
+        logger.warn({ err, queueId: candidate.id }, "failed to retire legacy reviewer-question notification");
+      }
+    }
+  }
+
   async function resumeQueuedRuns() {
     if ((await getSchedulingSuppression()).suppressed) return;
     await resumeExecutionWaitComments();
@@ -19773,6 +19841,7 @@ export function heartbeatService(
     for (const agentId of agentIds) {
       await startNextQueuedRunForAgent(agentId);
     }
+    await retireLegacyReviewerQuestionNotifications(cutoff);
   }
 
   async function recoverActiveSessionGoals() {
