@@ -588,9 +588,12 @@ export function decideQueuedRunStaleness(
     };
   }
 
-  if (facts.retryReasonKind === "native_safe_replacement" && facts.dependenciesBlocked) {
+  if (facts.dependenciesBlocked && (facts.retryReasonKind === "native_safe_replacement" ||
+      (facts.wakeReason === "interaction_pending" && !facts.isPendingInteractionAddresseeWake))) {
     return { stale: true, errorCode: "issue_dependencies_blocked",
-      reason: "Cancelled because issue dependencies became blocked before replacement dispatch",
+      reason: facts.retryReasonKind === "native_safe_replacement"
+        ? "Cancelled because issue dependencies became blocked before replacement dispatch"
+        : "Cancelled because the pending question is unavailable and task dependencies are still blocked",
       details: { issueId: facts.issueId,
         unresolvedBlockerIssueIds: facts.dependenciesBlocked.unresolvedBlockerIssueIds,
         unresolvedBlockerCount: facts.dependenciesBlocked.unresolvedBlockerCount } };

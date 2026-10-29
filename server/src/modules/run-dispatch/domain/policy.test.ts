@@ -444,6 +444,15 @@ describe("decideQueuedRunStaleness", () => {
     }, NOW)).toMatchObject({ stale: true, errorCode: "issue_terminal_status" });
   });
 
+  it.each([false, true])("revalidates a dependency-blocked question before dispatch: %s", (verified) => {
+    expect(decideQueuedRunStaleness({
+      ...baseStalenessFacts(), issueStatus: "blocked", wakeReason: "interaction_pending",
+      isInteractionWake: verified, isPendingInteractionAddresseeWake: verified,
+      dependenciesBlocked: { unresolvedBlockerIssueIds: ["child"], unresolvedBlockerCount: 1 },
+    }, NOW)).toMatchObject(verified ? { stale: false }
+      : { stale: true, errorCode: "issue_dependencies_blocked" });
+  });
+
   it("allows resume intent to bypass a terminal status", () => {
     const facts: QueuedRunFacts = {
       ...baseStalenessFacts(),
