@@ -9456,15 +9456,19 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     await db.insert(agents).values({ id: predecessorAgentId, companyId, name: "Previous reviewer", role: "engineer",
       status: "idle", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} });
     await db.insert(heartbeatRuns).values({ id: predecessorId, companyId, agentId: predecessorAgentId,
-      status: "succeeded", finishedAt: new Date(), contextSnapshot: { issueId },
-      resultJson: { conversationContinuation: "continue_conversation_v1" } });
+      status: "cancelled", errorCode: "issue_reassigned", finishedAt: new Date(), contextSnapshot: { issueId },
+      resultJson: { conversationContinuation: "continue_conversation_v1",
+        executionCancellation: { state: "acknowledged" } } });
     const [lease] = await db.insert(environmentLeases).values({ companyId, issueId,
       heartbeatRunId: predecessorId, status: "active" }).returning();
+    expect(await getExecutionBlocker(db, companyId, issueId)).toMatchObject({
+      runId: predecessorId, cause: "execution_owner_active" });
     const heartbeat = heartbeatService(db);
     expect((await heartbeat.reconcileStrandedAssignedIssues()).reviewParticipantRequeued).toBe(0);
     expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId))).toHaveLength(0);
     await db.update(environmentLeases).set({ status: "released", releasedAt: new Date() })
       .where(eq(environmentLeases.id, lease!.id));
+    expect(await getExecutionBlocker(db, companyId, issueId)).toBeNull();
     // A fresh service simulates recovery after a restart; no in-memory saved wake is needed.
     expect((await heartbeatService(db).reconcileStrandedAssignedIssues()).reviewParticipantRequeued).toBe(1);
     expect((await heartbeatService(db).reconcileStrandedAssignedIssues()).reviewParticipantRequeued).toBe(0);
@@ -9473,9 +9477,13 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
   });
 
   it("cancels a queued first-review recovery when the same agent moves to another stage", async () => {
-    const { companyId, agentId, issueId, stageId } = await seedFirstReviewHandoff();
-    expect((await heartbeatService(db).reconcileStrandedAssignedIssues()).reviewParticipantRequeued).toBe(1);
-    const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId));
+    const { companyId, issueId, stageId, runId } = await seedInReviewParticipantRunFixture();
+    // Seed the queued boundary directly so background dispatch cannot claim it
+    // before this test advances the stage. Initial admission is covered above.
+    await db.update(heartbeatRuns).set({ contextSnapshot: { issueId, taskId: issueId,
+      wakeReason: "execution_review_participant_recovery", currentStageId: stageId,
+      source: "issue.execution_review_initial_recovery" } }).where(eq(heartbeatRuns.id, runId));
+    const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
     const [issue] = await db.select().from(issues).where(eq(issues.id, issueId));
     expect(run!.contextSnapshot).toMatchObject({ currentStageId: stageId });
     await db.update(issues).set({ executionState: { ...issue!.executionState,
