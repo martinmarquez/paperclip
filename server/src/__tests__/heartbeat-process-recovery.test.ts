@@ -9509,6 +9509,21 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId))).toHaveLength(1);
   });
 
+  it("redelivers a missing newer question when an older pending question already had a run", async () => {
+    const { agentId, issueId, runId, interactionId } = await seedPendingReviewerQuestion();
+    const [first] = await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.id, interactionId));
+    const newerId = randomUUID();
+    await db.insert(issueThreadInteractions).values({ ...first!, id: newerId, idempotencyKey: null,
+      createdAt: new Date(first!.createdAt.getTime() + 1_000) });
+    await db.update(heartbeatRuns).set({ status: "succeeded", contextSnapshot: { issueId, interactionId } })
+      .where(eq(heartbeatRuns.id, runId));
+    expect((await heartbeatService(db).reconcileStrandedAssignedIssues()).reviewParticipantRequeued).toBe(1);
+    await heartbeatService(db).reconcileStrandedAssignedIssues();
+    const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId));
+    expect(runs.filter(run => run.contextSnapshot?.interactionId === interactionId)).toHaveLength(1);
+    expect(runs.filter(run => run.contextSnapshot?.interactionId === newerId)).toHaveLength(1);
+  });
+
   it("does not repeatedly dispatch an unanswered question that already had a provider run", async () => {
     const { agentId, issueId, runId, interactionId } = await seedPendingReviewerQuestion();
     await db.update(heartbeatRuns).set({ status: "succeeded", contextSnapshot: { issueId, interactionId } })
@@ -9521,7 +9536,8 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     const { companyId, agentId, issueId, runId } = await seedPendingReviewerQuestion();
     if (gate === "pause") await db.insert(issueTreeHolds).values({ companyId, rootIssueId: issueId, mode: "pause",
       status: "active", reason: "Manual pause", releasePolicy: { strategy: "manual" } });
-    else if (gate === "stop") await db.update(heartbeatRuns).set({ resultJson: { cancelledByActorType: "user" } })
+    else if (gate === "stop") await db.update(heartbeatRuns).set({ resultJson: { cancelledByActorType: "user" },
+      contextSnapshot: { issueId, currentStageId: randomUUID() } })
       .where(eq(heartbeatRuns.id, runId));
     else await db.insert(issueRecoveryActions).values({ companyId, sourceIssueId: issueId, kind: "execution_reconciliation",
       status: "active", ownerType: "board", cause: "unknown_action_outcome", fingerprint: `unknown:${issueId}`,

@@ -113,3 +113,9 @@ If its predecessor still owns a process or lease, the initial reviewer-question
 notification remains a coalesced diagnostic wait. Its durable question card is
 the pending intent; a misleading live execution receipt cannot hide it from
 recovery. Normal admission rechecks ownership before the eventual dispatch.
+
+When pending reviewer questions coexist, recovery chooses the oldest one without
+an existing delivery run. An older unanswered card cannot starve a newer missing
+notification. Operator Stops deliberately remain effective across automatic
+stage changes; stage filtering changes retry ownership, not permission to
+ignore a Stop or unresolved control record. Explicit resume remains required.

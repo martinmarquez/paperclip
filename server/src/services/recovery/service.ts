@@ -4556,13 +4556,13 @@ export function recoveryService(
       }
 
       const pendingInteractions = await getPendingWakeInteractions(issue.companyId, issue.id);
-      const reviewerQuestion = pendingExecutionState?.currentStageId && participantAgentId === agentId &&
+      const reviewerQuestions = pendingExecutionState?.currentStageId && participantAgentId === agentId &&
         pendingInteractions.length > 0 && pendingInteractions.length <= 50 &&
         pendingInteractions.every(interaction => interaction.kind === "ask_user_questions" &&
           interaction.addresseeAgentId === agentId &&
           issueThreadInteractionAttentionAgentAllowed({ agentId, interaction }))
-        ? pendingInteractions[0] : null;
-      if (pendingInteractions.length && !reviewerQuestion) {
+        ? pendingInteractions : [];
+      if (pendingInteractions.length && !reviewerQuestions.length) {
         result.skipped += 1;
         continue;
       }
@@ -4592,16 +4592,19 @@ export function recoveryService(
         continue;
       }
 
-      if (reviewerQuestion) {
+      if (reviewerQuestions.length) {
         // An addressed question is work for this reviewer, not a human wait.
         // Recover only its missing initial delivery. Once a run exists, normal
         // bounded retry/disposition handling owns it; never loop on an answer.
-        const [delivered] = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
-          eq(heartbeatRuns.companyId, issue.companyId), eq(heartbeatRuns.agentId, agentId),
-          sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issue.id}`,
-          sql`${heartbeatRuns.contextSnapshot}->>'interactionId' = ${reviewerQuestion.id}`,
-        )).limit(1);
-        if (!agentInvokable || delivered || await isInvocationBudgetBlocked(issue, agentId)) {
+        const delivered = await db.select({ interactionId: sql<string>`${heartbeatRuns.contextSnapshot}->>'interactionId'` })
+          .from(heartbeatRuns).where(and(
+            eq(heartbeatRuns.companyId, issue.companyId), eq(heartbeatRuns.agentId, agentId),
+            sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issue.id}`,
+            inArray(sql<string>`${heartbeatRuns.contextSnapshot}->>'interactionId'`, reviewerQuestions.map(question => question.id)),
+          ));
+        const deliveredIds = new Set(delivered.map(run => run.interactionId));
+        const reviewerQuestion = reviewerQuestions.find(question => !deliveredIds.has(question.id));
+        if (!agentInvokable || !reviewerQuestion || await isInvocationBudgetBlocked(issue, agentId)) {
           result.skipped += 1;
           continue;
         }
