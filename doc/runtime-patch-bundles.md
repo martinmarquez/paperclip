@@ -68,3 +68,18 @@ termination and released leases, then settles the no-replay hold without
 creating a continuation or retry. It can record an old reviewer's verified
 outcome after the task was reassigned. Ordinary resumption retains its original
 owner checks. Unknown, completed or mixed outcomes cannot use this operation.
+
+## Recover a handoff before the first reviewer run
+
+A review or approval handoff can be skipped while the preceding participant's
+terminal run still owns an environment lease. The existing startup and periodic
+assigned-issue recovery sweeps also handle a pending agent stage with no run for
+that participant. They reconstruct the current stage's initial dispatch after
+cleanup; no additional timer, service, or provider capacity is needed.
+
+Admission rechecks the task's status, assignee, pending stage ID and participant
+under the issue lock. Existing process/lease ownership, unknown-outcome holds,
+operator pauses, interactions, company status and budget gates still apply.
+Queued/running work coalesces under normal admission; unsuccessful reviewer runs
+retain the existing bounded retry and escalation policy. This recovery neither
+submits a review decision nor replays the preceding participant's action.

@@ -200,7 +200,8 @@ type RecoveryWakeupOptions = {
   contextSnapshot?: Record<string, unknown>;
   issueStateGuard?: {
     statuses: string[];
-    assigneeAgentId: string;
+    assigneeAgentId: string | null;
+    executionStageId?: string;
   };
 };
 
@@ -1900,6 +1901,7 @@ export function recoveryService(
     source: string;
     retryOfRunId?: string | null;
     extraContext?: Record<string, unknown>;
+    issueStateGuard?: RecoveryWakeupOptions["issueStateGuard"];
     /**
      * Out-parameter: set `retryExhausted` when no successor was queued
      * because the failed predecessor has spent its bounded transient retry
@@ -1991,6 +1993,7 @@ export function recoveryService(
             },
           }
         : {}),
+      ...(input.issueStateGuard ? { issueStateGuard: input.issueStateGuard } : {}),
       payload: withRecoveryContext(
         {
           issueId: input.issueId,
@@ -4920,6 +4923,41 @@ export function recoveryService(
           continue;
         }
         const participantLatestRun = participantLatestRunForRecovery;
+
+        // A stage handoff can reach admission before the previous participant's
+        // environment lease finishes releasing. That skipped wake created no
+        // reviewer run to retry. Recover the current stage's first dispatch;
+        // normal admission still owns process/lease, pause and recovery gates.
+        if (!participantLatestRun && agentInvokable && pendingExecutionState.currentStageId) {
+          if (await hasQueuedIssueWake(issue.companyId, issue.id, participantAgentId) ||
+              await isInvocationBudgetBlocked(issue, participantAgentId)) {
+            result.skipped += 1;
+            continue;
+          }
+          const queued = await enqueueStrandedIssueRecovery({
+            issueId: issue.id,
+            agentId: participantAgentId,
+            reason: EXECUTION_REVIEW_PARTICIPANT_RECOVERY_REASON,
+            retryReason: EXECUTION_REVIEW_PARTICIPANT_RECOVERY_REASON,
+            source: "issue.execution_review_initial_recovery",
+            issueStateGuard: {
+              statuses: ["in_review"],
+              assigneeAgentId: issue.assigneeAgentId,
+              executionStageId: pendingExecutionState.currentStageId,
+            },
+            extraContext: {
+              currentStageId: pendingExecutionState.currentStageId,
+              currentStageType: pendingExecutionState.currentStageType,
+              reviewRecoveryInstruction:
+                "The current execution stage has not started. Review the task evidence and submit this stage's decision, or mark the issue blocked with the exact unblock action.",
+            },
+          });
+          if (queued) {
+            result.reviewParticipantRequeued += 1;
+            result.issueIds.push(issue.id);
+          } else result.skipped += 1;
+          continue;
+        }
 
         if (
           !participantLatestRun ||

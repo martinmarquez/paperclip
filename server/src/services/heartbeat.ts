@@ -3783,8 +3783,9 @@ interface WakeupOptions {
   contextSnapshot?: Record<string, unknown>;
   issueStateGuard?: {
     statuses: string[];
-    assigneeAgentId: string;
+    assigneeAgentId: string | null;
     statusVersion?: number;
+    executionStageId?: string;
   };
   /** Keep causally distinct external chat continuations out of an existing run. */
   allowRunCoalescing?: boolean;
@@ -27761,6 +27762,7 @@ export function heartbeatService(
               statusVersion: issues.statusVersion,
               projectId: issues.projectId,
               projectWorkspaceId: issues.projectWorkspaceId,
+              executionState: issues.executionState,
               executionWorkspaceId: issues.executionWorkspaceId,
               executionWorkspacePreference: issues.executionWorkspacePreference,
               executionWorkspaceSettings: issues.executionWorkspaceSettings,
@@ -27995,11 +27997,18 @@ export function heartbeatService(
           }))) return deferBlockedExecution(executionBlocker);
 
           const issueStateGuard = opts.issueStateGuard;
+          const guardedExecutionState = issueStateGuard?.executionStageId
+            ? parseIssueExecutionState(issue.executionState) : null;
           if (
             issueStateGuard &&
             (!issueStateGuard.statuses.includes(issue.status) ||
               issue.assigneeAgentId !== issueStateGuard.assigneeAgentId ||
-              (issueStateGuard.statusVersion !== undefined && issue.statusVersion !== issueStateGuard.statusVersion))
+              (issueStateGuard.statusVersion !== undefined && issue.statusVersion !== issueStateGuard.statusVersion) ||
+              (issueStateGuard.executionStageId !== undefined &&
+                (guardedExecutionState?.status !== "pending" ||
+                  guardedExecutionState.currentStageId !== issueStateGuard.executionStageId ||
+                  guardedExecutionState.currentParticipant?.type !== "agent" ||
+                  guardedExecutionState.currentParticipant.agentId !== agentId)))
           ) {
             await tx.insert(agentWakeupRequests).values({
               ...durableReceiptFields,
