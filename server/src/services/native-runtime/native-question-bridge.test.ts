@@ -681,12 +681,16 @@ describeEmbeddedPostgres("native question bridge", () => {
     const interaction = await projectNativeRuntimeRequest({ db, binding: binding(), event: runtimeRequestEvent() });
     await db.update(heartbeatRuns).set({
       status: "failed", errorCode: "adapter_failed", finishedAt: new Date(),
-      resultJson: { errorFamily: "transient_upstream" },
+      resultJson: { errorFamily: "transient_upstream" }, contextSnapshot: {},
     }).where(eq(heartbeatRuns.id, runId));
     const scheduled = await heartbeat.scheduleBoundedRetry(runId, { delayMs: 3_600_000 });
     expect(scheduled.outcome).toBe("scheduled");
     if (scheduled.outcome !== "scheduled") return;
-    expect(scheduled.run).toMatchObject({ status: "scheduled_retry", runtimeMode: "legacy", nativeIssueId: null });
+    expect(scheduled.run).toMatchObject({
+      status: "scheduled_retry", runtimeMode: "legacy", nativeIssueId: null, contextSnapshot: { issueId },
+    });
+    const [issue] = await db.select().from(issues).where(eq(issues.id, issueId));
+    expect((await collectDispositionRepairSourceState(db, { issue })).hasActiveExecutionPath).toBe(true);
     await expect(nativeQuestionRunToCancel(db, interaction!)).resolves.toBe(scheduled.run.id);
     const [otherIssue] = await db.insert(issues).values({ companyId, title: "Other task", status: "in_progress" }).returning();
     const [unrelated] = await db.insert(heartbeatRuns).values({

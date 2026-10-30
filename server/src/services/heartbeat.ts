@@ -15518,7 +15518,7 @@ export function heartbeatService(
         : null;
     const transientRetryNotBefore = transientRecovery?.retryNotBefore ?? null;
     const contextSnapshot = parseObject(run.contextSnapshot);
-    const issueId = readNonEmptyString(contextSnapshot.issueId);
+    const issueId = run.nativeIssueId ?? readNonEmptyString(contextSnapshot.issueId);
 
     if (!baseSchedule) {
       const exhaustion = {
@@ -15670,6 +15670,7 @@ export function heartbeatService(
     const retryContextSnapshot: Record<string, unknown> = withRecoveryContext(
       {
         ...contextSnapshot,
+        ...(issueId ? { issueId } : {}),
         executionRetryAccounting: accountingForScheduledRetry(run, retryReason, schedule.attempt),
         retryOfRunId: run.id,
         wakeReason,

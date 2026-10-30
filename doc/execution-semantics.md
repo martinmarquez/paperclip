@@ -1625,14 +1625,16 @@ intact.
 
 ### Explicit continuation wakes
 
-Disposition repair recognizes queued, running and scheduled native retries by
-their persisted native task binding, even when the legacy context snapshot is
-missing or names a different task. The native binding takes precedence; legacy
-runs retain their same-company context association. An active run does not grant
-another owner permission to dispatch duplicate recovery work.
+Disposition repair recognizes active native runs by their persisted native task
+binding, even when the legacy context snapshot is missing or stale. Scheduling
+copies this canonical task into a retry placeholder's legacy context. Historical
+legacy placeholders still require their own correct same-company task context;
+repair does not infer their task from an unrelated ancestor. An active run does
+not grant another owner permission to dispatch duplicate recovery work.
 
 Withdrawing or cancelling a native question records cancellation intent for a
-scheduled retry as well as a queued or running turn. The existing post-commit
+same-task scheduled retry as well as a queued or running turn. Legacy successors
+must retain a matching task context. The existing post-commit
 path and recovery sweep consume that intent. Company, task, native runtime and
 question identity checks remain required; historical legacy questions do not
 acquire native execution authority.
