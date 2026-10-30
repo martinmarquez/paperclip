@@ -1806,6 +1806,87 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action!.id)))[0]).toEqual(recorded);
   });
 
+  async function seedRecordOnlyReconciliation() {
+    const fixture = await seedCompany();
+    const { companyId, coderId, managerId, sourceIssueId } = fixture;
+    const runId = randomUUID();
+    await seedHeartbeatRun({ companyId, agentId: coderId, runId, issueId: sourceIssueId, status: "failed" });
+    await db.update(agents).set({ status: "paused" }).where(eq(agents.id, coderId));
+    await db.update(issues).set({ status: "blocked", assigneeAgentId: managerId }).where(eq(issues.id, sourceIssueId));
+    const [action] = await db.insert(issueRecoveryActions).values({
+      companyId, sourceIssueId, kind: "active_run_watchdog", status: "resolved", outcome: "blocked",
+      ownerType: "board", returnOwnerAgentId: coderId,
+      cause: "legacy_execution_requires_reconciliation", fingerprint: runId,
+      nextAction: "Reconcile the stopped webhook without replay.",
+      evidence: { runId, automaticRecovery: { replay: "blocked", actionOutcome: "unknown" } },
+    }).returning();
+    const body = {
+      recordOnly: true, actionId: action!.id, outcome: "restored", sourceIssueStatus: "blocked",
+      executionReconciliation: { runId, providerStopped: true, actionOutcome: "not_performed",
+        outcomeEvidence: "Retained receiver metadata proves it stopped before this request; its source rejects this task before provider dispatch." },
+    };
+    return { ...fixture, runId, action: action!, body };
+  }
+
+  it("records verified unperformed work after reassignment without resuming a paused owner", async () => {
+    const { companyId, coderId, managerId, sourceIssueId, runId, action, body } = await seedRecordOnlyReconciliation();
+    const app = createApp();
+    const result = await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body).expect(200);
+    expect(result.body.issue).toMatchObject({ status: "blocked", assigneeAgentId: managerId });
+    const [recorded] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
+    expect(recorded).toMatchObject({ status: "resolved", outcome: "restored", evidence: {
+      automaticRecovery: { replay: "verified_without_continuation", actionOutcome: "not_performed" },
+      executionReconciliation: { runId, actionOutcome: "not_performed" }, continuationDelivery: "not_requested",
+    } });
+    expect((await request(app).get(`/api/issues/${sourceIssueId}`).expect(200)).body.executionBlocker).toBeNull();
+    const wake = vi.fn();
+    await deliverReconciledExecutions(db, wake);
+    expect(wake).not.toHaveBeenCalled();
+    expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, companyId))).toHaveLength(0);
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId))).toHaveLength(1);
+    expect((await db.select().from(agents).where(eq(agents.id, coderId)))[0]!.status).toBe("paused");
+    expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId)))[0]!.status).toBe("failed");
+    await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body).expect(200);
+    expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id)))[0]).toEqual(recorded);
+  });
+
+  it.each(["status_change", "unknown_outcome", "missing_action", "live_process", "wrong_task", "agent_actor", "cancelled_action", "superseding_action", "newer_hold"])(
+    "preserves the hold when record-only reconciliation has %s", async (scenario) => {
+      const { companyId, managerId, sourceIssueId, runId, action, body } = await seedRecordOnlyReconciliation();
+      const requestBody = structuredClone(body);
+      let expected = 409;
+      if (scenario === "status_change") requestBody.sourceIssueStatus = "todo";
+      if (scenario === "unknown_outcome") {
+        Object.assign(requestBody.executionReconciliation, { actionOutcome: "unknown" }); expected = 400;
+      }
+      if (scenario === "missing_action") {
+        Object.assign(requestBody, { actionId: undefined }); expected = 400;
+      }
+      if (scenario === "live_process") await db.update(heartbeatRuns).set({ processPid: process.pid }).where(eq(heartbeatRuns.id, runId));
+      if (scenario === "wrong_task") await db.update(heartbeatRuns).set({ contextSnapshot: { issueId: randomUUID() } }).where(eq(heartbeatRuns.id, runId));
+      if (scenario === "cancelled_action") await db.update(issueRecoveryActions).set({ status: "cancelled", outcome: "cancelled" }).where(eq(issueRecoveryActions.id, action.id));
+      if (scenario === "superseding_action" || scenario === "newer_hold") {
+        const newerRunId = randomUUID();
+        await seedHeartbeatRun({ companyId, agentId: managerId, runId: newerRunId, issueId: sourceIssueId, status: "failed" });
+        await db.insert(issueRecoveryActions).values({
+          companyId, sourceIssueId, kind: "active_run_watchdog", ownerType: "board",
+          status: scenario === "superseding_action" ? "active" : "resolved", outcome: scenario === "superseding_action" ? null : "blocked",
+          cause: "legacy_execution_requires_reconciliation", fingerprint: newerRunId,
+          nextAction: "Reconcile the newer failure.", createdAt: new Date(Date.now() + 1000), updatedAt: new Date(Date.now() + 1000),
+          evidence: { runId: newerRunId, automaticRecovery: { replay: "blocked", actionOutcome: "unknown" } },
+        });
+      }
+      const actor = scenario === "agent_actor"
+        ? { type: "agent", agentId: managerId, companyId, runId: randomUUID(), source: "agent_jwt" }
+        : undefined;
+      if (actor) expected = 403;
+      await request(createApp(actor)).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(requestBody).expect(expected);
+      expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id)))[0]!.evidence).toEqual(action.evidence);
+      expect((await db.select().from(issues).where(eq(issues.id, sourceIssueId)))[0]).toMatchObject({ status: "blocked", assigneeAgentId: managerId });
+      expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, companyId))).toHaveLength(0);
+    },
+  );
+
   async function seedReconciledDelivery() {
     const fixture = await seedCompany();
     const { companyId, coderId, sourceIssueId } = fixture;

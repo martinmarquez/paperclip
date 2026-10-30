@@ -29,6 +29,7 @@ import { forbidden, notFound, unprocessable } from "../errors.js";
 import { accessService } from "../services/access.js";
 import { logActivity } from "../services/activity-log.js";
 import { aiConnectionRouterService } from "../services/ai-connection-router.js";
+import { inspectRouterTaskPin, releaseOrphanedRouterPin } from "../services/orphaned-router-pin.js";
 import { aiConnectionService } from "../services/ai-connections.js";
 import { validate } from "../middleware/validate.js";
 
@@ -176,6 +177,32 @@ export function aiConnectionRoutes(db: Db, options: Parameters<typeof supportsLo
   const service = aiConnectionService(db);
   const localLogin = localAiLoginService(db);
   const pools = aiConnectionRouterService(db);
+  router.get("/companies/:companyId/ai-connection-pools/:poolId/task-pins/:agentId/:taskKey", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertBoard(req); assertCompanyAccess(req, companyId);
+    if (!(await canManageAiConnections(db, req, companyId))) throw forbidden("Manage connections permission is required");
+    const ids = z.object({ poolId: z.string().uuid(), agentId: z.string().uuid(), taskKey: z.string().uuid() }).parse(req.params);
+    res.setHeader("Cache-Control", "no-store");
+    res.json(await inspectRouterTaskPin(db, { companyId, ...ids }));
+  });
+  router.post("/companies/:companyId/ai-connection-pools/:poolId/task-pins/release", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertBoard(req); assertCompanyAccess(req, companyId);
+    if (!(await canManageAiConnections(db, req, companyId))) throw forbidden("Manage connections permission is required");
+    const body = z.object({
+      agentId: z.string().uuid(), taskKey: z.string().uuid(), expectedPinId: z.string().uuid(),
+      expectedMemberId: z.string().min(1).max(160), expectedRevision: z.number().int().positive(),
+      resetActivityId: z.string().uuid(), dryRun: z.boolean().default(true),
+      expectedLocalHost: z.string().min(1).max(255).optional(),
+      localOriginVerifications: z.array(z.object({
+        runId: z.string().uuid(), leaseId: z.string().uuid(), sourceHost: z.string().min(1).max(255),
+        evidence: z.string().trim().min(80).max(4000),
+      }).strict()).max(100).optional(),
+    }).strict().parse(req.body);
+    res.json(await releaseOrphanedRouterPin(db, {
+      ...body, companyId, poolId: z.string().uuid().parse(req.params.poolId), actorId: getActorInfo(req).actorId,
+    }));
+  });
   router.get("/companies/:companyId/ai-connection-pools", async (req, res) => {
     const companyId = req.params.companyId as string;
     assertBoard(req); assertCompanyAccess(req, companyId);

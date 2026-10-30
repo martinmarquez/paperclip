@@ -1,3 +1,4 @@
+import { hasAssigneeQuestionWait } from "../services/issue-question-wait.js";
 import { setIssueTitle } from "../services/issue-title.js";
 import { setIssueTitleSchema } from "@paperclipai/shared";
 import { resolveConfirmationFromComment } from "../services/confirmation-comment-resolution.js";
@@ -1407,6 +1408,7 @@ const ISSUE_WAKE_DIAGNOSTIC_KNOWN_REASONS = new Set([
   "issue_execution_deferred",
   "chat_task_completed",
   "issue_assigned",
+  "issue_resumed",
   "issue_blockers_resolved",
   "issue_commented",
   "issue_comment_mentioned",
@@ -1475,12 +1477,15 @@ function projectIssueWakeRequest(
     finishedAt: Date | string | null;
     error: string | null;
   },
-  options: { includeInternalIds: boolean },
+  options: { includeInternalIds: boolean; actorAgentId?: string },
 ): IssueWakeDiagnosticWakeRequest {
   const status = projectWakeDiagnosticStatus(row.status);
   return {
     kind: "wake_request",
-    agentId: options.includeInternalIds ? row.agentId : null,
+    agentId:
+      options.includeInternalIds || row.agentId === options.actorAgentId
+        ? row.agentId
+        : null,
     source: projectWakeDiagnosticSource(row.source) ?? "other",
     reason: projectWakeDiagnosticReason(row.reason),
     status,
@@ -1709,6 +1714,7 @@ function buildIssueWakeDiagnosticsResponse(input: {
   truncatedWakeRequests: boolean;
   truncatedActivityRecords: boolean;
   includeInternalIds: boolean;
+  actorAgentId?: string;
   maxWakeRequests?: number;
   maxActivityRecords?: number;
   lookbackDays?: number;
@@ -1718,6 +1724,7 @@ function buildIssueWakeDiagnosticsResponse(input: {
     ...input.wakeRequests.map((record) =>
       projectIssueWakeRequest(record, {
         includeInternalIds: input.includeInternalIds,
+        actorAgentId: input.actorAgentId,
       }),
     ),
     ...input.activityRecords.map((record) =>
@@ -3603,6 +3610,7 @@ export function issueRoutes(
     companyId: string;
     issueId: string;
     agentId: string;
+    onAccepted?: () => void;
   }) => {
     const current = await runnerGoals.projection(
       input.companyId,
@@ -3633,6 +3641,7 @@ export function issueRoutes(
       expectedRevision: current.revision,
       action,
     });
+    input.onAccepted?.();
     const deadline = Date.now() + 30_000;
     while (Date.now() < deadline) {
       const observed = await runnerGoals.projection(
@@ -8749,6 +8758,7 @@ export function issueRoutes(
       truncatedWakeRequests: wakeDiagnostic.truncatedWakeRequests,
       truncatedActivityRecords: wakeDiagnostic.truncatedActivityRecords,
       includeInternalIds,
+      actorAgentId: req.actor.type === "agent" ? req.actor.agentId : undefined,
     });
 
     logger.info(
@@ -9140,7 +9150,9 @@ export function issueRoutes(
         sourceIssueStatus,
         resolutionNote,
         executionReconciliation,
+        recordOnly,
       } = req.body;
+      if (recordOnly) assertBoard(req);
       if (outcome === "false_positive" || outcome === "cancelled") {
         assertBoard(req);
       }
@@ -9192,7 +9204,12 @@ export function issueRoutes(
             );
             const automatic = settled.evidence.automaticRecovery as
               { replay?: string } | undefined;
-            if (automatic?.replay === "blocked" && executionReconciliation) {
+            if (automatic?.replay === "blocked" && executionReconciliation && recordOnly) {
+              if (activeRecoveryAction || settled.status !== "resolved" || settled.outcome !== "blocked") {
+                throw conflict("Another recovery action or an obsolete failure must be resolved before recording this execution.");
+              }
+              activeRecoveryAction = issueRecoveryActionReadModel(settled);
+            } else if (automatic?.replay === "blocked" && executionReconciliation) {
               // An automatic no-replay disposition is final until new evidence
               // arrives. Keep the supported evidence API usable without a dialog.
               assertBoard(req);
@@ -9232,6 +9249,30 @@ export function issueRoutes(
           activeRecoveryAction,
           { source: "recovery_action_resolution" },
         );
+
+        if (recordOnly) {
+          if (sourceIssueStatus !== lockedIssue.status || !executionReconciliation ||
+              !requiresExecutionReconciliation(activeRecoveryAction.cause)) {
+            throw conflict("Recording execution evidence cannot change task status or another recovery cause.");
+          }
+          const blocker = await getExecutionBlocker(tx as unknown as Db, lockedIssue.companyId, lockedIssue.id);
+          if (blocker?.recoveryActionId !== activeRecoveryAction.id) {
+            throw conflict("The recorded execution is no longer the current recovery blocker.");
+          }
+          await validateExecutionReconciliation({
+            db: tx as unknown as Db, companyId: lockedIssue.companyId,
+            issueId: lockedIssue.id, agentId: lockedIssue.assigneeAgentId,
+            sourceRunId: activeRecoveryAction.evidence.runId ?? activeRecoveryAction.evidence.sourceRunId,
+            decision: executionReconciliation, recordOnly: true,
+          });
+          await markExecutionReconciliation(tx as unknown as Db, activeRecoveryAction,
+            executionReconciliation, actor.actorId, undefined, true);
+          const [recoveryAction] = await tx.update(issueRecoveryActions).set({
+            status: "resolved", outcome: "restored", resolutionNote: resolutionNote ?? null,
+            resolvedAt: new Date(), updatedAt: new Date(),
+          }).where(eq(issueRecoveryActions.id, activeRecoveryAction.id)).returning();
+          return { issue: lockedIssue, recoveryAction: recoveryAction!, chatRetry: null };
+        }
 
         if (outcome === "restored" && activeRecoveryAction.cause === "native_workspace_sync_out_unsafe_archive") {
           throw conflict("Unsafe workspace export recovers automatically without another provider turn.", { code: "workspace_export_automatic_recovery" });
@@ -9593,6 +9634,7 @@ export function issueRoutes(
           outcome: result.recoveryAction.outcome,
           sourceIssueStatus: sourceIssueStatus ?? null,
           resolutionNote: result.recoveryAction.resolutionNote,
+          recordOnly: recordOnly ?? false,
         },
       });
 
@@ -13203,7 +13245,16 @@ export function issueRoutes(
         req.body.executionPolicy !== undefined && monitorChanged,
       );
 
+      const waitingOnOwnQuestion = await hasAssigneeQuestionWait(db, {
+        companyId: existing.companyId, issueId: existing.id,
+        assigneeAgentId: existing.assigneeAgentId,
+        agentId: req.actor.type === "agent" ? actor.agentId : null,
+        runId: req.actor.type === "agent" ? actor.runId : null,
+        requestedStatus: typeof updateFields.status === "string" ? updateFields.status : undefined,
+      });
+
       const transition = applyIssueExecutionPolicyTransition({
+        waitingOnOwnQuestion,
         issue: existing,
         policy: nextExecutionPolicy,
         previousPolicy: previousExecutionPolicy,
@@ -13457,19 +13508,46 @@ export function issueRoutes(
       // Only this request may finish a mutation that intentionally stops its
       // own run (for example handing work to a signoff reviewer).
       const issueMutationStopId = randomUUID();
-      if (assigneeWillChange && existing.assigneeAgentId) {
+      const confirmedReassignmentStops: string[] = [];
+      let reassignmentGoalStopAccepted = false;
+      const stopForReassignment = async () => {
+        if (!assigneeWillChange || !existing.assigneeAgentId) return;
+        for (const attachmentId of new Set(commentAttachmentIds ?? [])) {
+          if (typeof attachmentId !== "string") throw unprocessable("Comment attachment IDs must be strings");
+          const attachment = await svc.getAttachmentById(attachmentId);
+          if (!attachment || attachment.companyId !== existing.companyId || attachment.issueId !== existing.id) {
+            throw unprocessable("Comment attachments must belong to the same task and company");
+          }
+        }
         await stopRunnerGoalForOwnershipChange({
           companyId: existing.companyId,
           issueId: existing.id,
           agentId: existing.assigneeAgentId,
+          onAccepted: () => { reassignmentGoalStopAccepted = true; },
         });
-        const runToStopForReassignment = await resolveActiveIssueRun(existing);
-        if (runToStopForReassignment) {
+        const stoppedRunIds = new Set<string>();
+        while (true) {
+          const runToStopForReassignment = await heartbeat.getActiveRunForAgent(existing.assigneeAgentId, {
+            companyId: existing.companyId, issueId: existing.id,
+            executionRunId: existing.executionRunId, checkoutRunId: existing.checkoutRunId, includePending: true,
+          });
+          if (!runToStopForReassignment) break;
+          if (stoppedRunIds.has(runToStopForReassignment.id) || stoppedRunIds.size >= 100) {
+            throw conflict("Task execution changed during reassignment; refresh before retrying", {
+              code: "issue_reassignment_stop_unconfirmed", runId: runToStopForReassignment.id,
+            });
+          }
+          stoppedRunIds.add(runToStopForReassignment.id);
+          if (runToStopForReassignment.companyId !== existing.companyId ||
+              runToStopForReassignment.agentId !== existing.assigneeAgentId ||
+              (runToStopForReassignment.nativeIssueId && runToStopForReassignment.nativeIssueId !== existing.id)) {
+            throw conflict("Reassignment run binding changed");
+          }
           const cancelled = await heartbeat.cancelRun(
             runToStopForReassignment.id,
             "Cancelled before issue reassignment",
             {
-              errorCode: "issue_reassigned",
+              errorCode: "issue_reassigned", suppressImmediateRecovery: true,
               resultJson: { reassignmentStopConfirmed: true, issueMutationStopId },
               eventMessage: "run cancelled before issue reassignment",
               eventPayload: { issueId: existing.id },
@@ -13484,9 +13562,33 @@ export function issueRoutes(
               },
             );
           }
-          interruptedRunId = cancelled.id;
+          confirmedReassignmentStops.push(cancelled.id);
+          interruptedRunId ??= cancelled.id;
         }
-      }
+      };
+      const restoreFailedReassignment = async () => {
+        if ((!confirmedReassignmentStops.length && !reassignmentGoalStopAccepted) || !existing.assigneeAgentId ||
+            !["todo", "in_progress"].includes(existing.status)) return;
+        const current = await svc.getById(existing.id);
+        if (!current || current.assigneeAgentId !== existing.assigneeAgentId ||
+            current.assigneeUserId !== existing.assigneeUserId || current.status !== existing.status ||
+            current.statusVersion !== existing.statusVersion) return;
+        for (const runId of new Set([current.executionRunId, current.checkoutRunId])) {
+          if (!runId || confirmedReassignmentStops.includes(runId)) continue;
+          const run = await heartbeat.getRun(runId);
+          if (!run || run.companyId !== existing.companyId ||
+              ["running", "queued", "scheduled_retry"].includes(run.status)) return;
+        }
+        await heartbeat.wakeup(existing.assigneeAgentId, {
+          source: "automation", triggerDetail: "system", reason: "issue_assigned",
+          requestedByActorType: actor.actorType, requestedByActorId: actor.actorId,
+          idempotencyKey: `issue-reassignment-rollback:${existing.id}:${issueMutationStopId}`,
+          payload: { issueId: existing.id, mutation: "reassignment_rollback", stoppedRunIds: confirmedReassignmentStops },
+          contextSnapshot: { issueId: existing.id, source: "issue.update", reassignmentRollback: true },
+          issueStateGuard: { statuses: [existing.status], assigneeAgentId: existing.assigneeAgentId,
+            statusVersion: existing.statusVersion },
+        });
+      };
 
       const terminalizingIssue =
         typeof updateFields.status === "string" &&
@@ -13574,6 +13676,7 @@ export function issueRoutes(
       const shouldCollectTerminalIssueActions =
         updateFields.status === "done" || updateFields.status === "cancelled";
       const updateIssue = (tx?: Parameters<typeof svc.update>[2]) => {
+        issueUpdateData.actorRunStopId = actor.agentId && interruptedRunId === actor.runId ? issueMutationStopId : null;
         if (tx) {
           if (shouldCollectCompletionPublication) {
             return svc.update(
@@ -13718,6 +13821,7 @@ export function issueRoutes(
         persistReviewActivityTransactionally ||
         reviewPolicySensitiveMutationRequested;
       try {
+        await stopForReassignment();
         if (shouldUseTransactionalIssueUpdate) {
           issue = await db.transaction(async (tx) => {
             if (
@@ -13781,6 +13885,8 @@ export function issueRoutes(
           issue = await updateIssue();
         }
       } catch (err) {
+        try { await restoreFailedReassignment(); }
+        catch (restoreError) { throw new AggregateError([err, restoreError], "issue_reassignment_restore_failed"); }
         if (err instanceof HttpError && err.status === 422) {
           logger.warn(
             {
@@ -13809,6 +13915,7 @@ export function issueRoutes(
         throw err;
       }
       if (!issue) {
+        await restoreFailedReassignment();
         res.status(404).json({ error: "Issue not found" });
         return;
       }
@@ -13821,6 +13928,7 @@ export function issueRoutes(
         let ownerNotifiedAt: Date | null = null;
         await deliverAgentUnblockNotification({
           issue: blockedIssue,
+          reportingAgentId: req.actor.type === "agent" ? req.actor.agentId : undefined,
           wakeup: heartbeat.wakeup,
           markNotified: async (blockedOwnerNotifiedAt) => {
             ownerNotifiedAt = blockedOwnerNotifiedAt;

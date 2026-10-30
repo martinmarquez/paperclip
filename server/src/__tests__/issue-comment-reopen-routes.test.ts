@@ -11,6 +11,7 @@ const mockIssueService = vi.hoisted(() => ({
   addComment: vi.fn(),
   getDependencyReadiness: vi.fn(),
   getCurrentScheduledRetry: vi.fn(),
+  getAttachmentById: vi.fn(),
   findMentionedAgents: vi.fn(),
   listWakeableBlockedDependents: vi.fn(),
   getWakeableParentAfterChildCompletion: vi.fn(),
@@ -49,6 +50,7 @@ const mockDbSelectOrderBy = vi.hoisted(() => vi.fn(async () => []));
 const mockDbSelectWhere = vi.hoisted(() =>
   vi.fn(() => ({
     orderBy: mockDbSelectOrderBy,
+    limit: async () => [],
     then: (
       onFulfilled: (rows: unknown[]) => unknown,
       onRejected?: (reason: unknown) => unknown,
@@ -367,6 +369,7 @@ describe("issue comment reopen routes", () => {
     mockDbSelectOrderBy.mockResolvedValue([]);
     mockDbSelectWhere.mockImplementation(() => ({
       orderBy: mockDbSelectOrderBy,
+      limit: async () => [],
       then: (
         onFulfilled: (rows: unknown[]) => unknown,
         onRejected?: (reason: unknown) => unknown,
@@ -542,6 +545,9 @@ describe("issue comment reopen routes", () => {
     const issue = makeIssue("todo");
     const id = "9af8228f-0be7-45ae-a104-6fbe0af6f1d3";
     mockIssueService.getById.mockResolvedValue(issue);
+    mockIssueService.getAttachmentById.mockResolvedValue({
+      id: "9af8228f-0be7-45ae-a104-6fbe0af6f1d3", companyId: issue.companyId, issueId: issue.id,
+    });
     mockIssueService.update.mockImplementation(
       async (_id: string, patch: Record<string, unknown>) =>
         makeIssueUpdateReceipt(issue, patch),
@@ -589,6 +595,9 @@ describe("issue comment reopen routes", () => {
   it("does not dispatch a wake or fallback comment when transactional attachment binding fails", async () => {
     const issue = makeIssue("todo");
     mockIssueService.getById.mockResolvedValue(issue);
+    mockIssueService.getAttachmentById.mockResolvedValue({
+      id: "9af8228f-0be7-45ae-a104-6fbe0af6f1d3", companyId: issue.companyId, issueId: issue.id,
+    });
     mockIssueService.update.mockImplementation(
       async (_id: string, patch: Record<string, unknown>) =>
         makeIssueUpdateReceipt(issue, patch),

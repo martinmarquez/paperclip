@@ -22,6 +22,7 @@ export function isProspectiveBlockedTransition(issue: RoutableBlockedIssue): iss
 
 export async function deliverAgentUnblockNotification(input: {
   issue: RoutableBlockedIssue;
+  reportingAgentId?: string;
   wakeup: (agentId: string, options: {
     source: "automation";
     triggerDetail: "system";
@@ -39,7 +40,7 @@ export async function deliverAgentUnblockNotification(input: {
   }
 
   const owner = issue.unblockDescriptor.owner;
-  if (owner === "board" || !("agentId" in owner)) return false;
+  if (owner === "board" || !("agentId" in owner) || owner.agentId === input.reportingAgentId) return false;
 
   await input.wakeup(owner.agentId, {
     source: "automation",

@@ -410,13 +410,30 @@ describeEmbeddedPostgres("issue wake diagnostics route", () => {
       createdAt: new Date(Date.now() - 1_000),
     });
 
+    await db.insert(agentWakeupRequests).values({
+      companyId: company.id,
+      agentId: agent.id,
+      source: "automation",
+      reason: "issue_resumed",
+      status: "deferred_issue_execution",
+      payload: { issueId: root.id },
+      runId: run.id,
+    });
+
     const resWithEvents = await request(createApp(db, agentActor(company, agent, run.id)))
       .get(`/api/issues/${root.id}/diagnostics/wakes`);
 
     expect(resWithEvents.status, JSON.stringify(resWithEvents.body)).toBe(200);
-    expect(resWithEvents.body.events).toHaveLength(2);
+    expect(resWithEvents.body.events).toHaveLength(3);
     const activityEvent = resWithEvents.body.events.find((event: { kind: string }) => event.kind === "activity");
-    const wakeEvent = resWithEvents.body.events.find((event: { kind: string }) => event.kind === "wake_request");
+    const wakeEvent = resWithEvents.body.events.find((event: { kind: string; agentId: string | null }) => event.kind === "wake_request" && event.agentId === null);
+    expect(resWithEvents.body.events).toContainEqual(expect.objectContaining({
+      kind: "wake_request",
+      agentId: agent.id,
+      runId: null,
+      status: "deferred_issue_execution",
+      reason: "issue_resumed",
+    }));
     expect(activityEvent).toMatchObject({
       kind: "activity",
       agentId: null,

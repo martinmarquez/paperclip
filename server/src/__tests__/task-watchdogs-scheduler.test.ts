@@ -14,6 +14,7 @@ import {
   issueDocuments,
   issueApprovals,
   issueThreadInteractions,
+  issueRecoveryActions,
   issueWorkProducts,
   issues,
   issueWatchdogs,
@@ -47,6 +48,7 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
     await db.delete(issueApprovals);
     await db.delete(approvals);
     await db.delete(issueThreadInteractions);
+    await db.delete(issueRecoveryActions);
     await db.delete(issueWorkProducts);
     await db.delete(issueDocuments);
     await db.delete(documents);
@@ -165,6 +167,40 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
     });
     return { service, wakes };
   }
+
+  it.each([
+    { payloadKind: "issueId", replay: "blocked", running: false, triggered: 1 },
+    { payloadKind: "nestedTaskId", replay: "blocked", running: false, triggered: 1 },
+    { payloadKind: "issueId", replay: "conversation_continuation", running: false, triggered: 0 },
+    { payloadKind: "nestedTaskId", replay: "conversation_continuation", running: false, triggered: 0 },
+    { payloadKind: "issueId", replay: "blocked", running: true, triggered: 0 },
+  ])("counts only executable wakes as live ($payloadKind, $replay, running=$running)", async ({ payloadKind, replay, running, triggered }) => {
+    const companyId = await seedCompany();
+    const agentId = await seedAgent(companyId);
+    const sourceId = await seedIssue(companyId, { status: "todo", assigneeAgentId: agentId });
+    await seedWatchdog(companyId, sourceId, agentId);
+    await db.insert(issueRecoveryActions).values({
+      companyId, sourceIssueId: sourceId, kind: "active_run_watchdog", status: "resolved",
+      cause: "legacy_execution_requires_reconciliation", fingerprint: randomUUID(), outcome: "blocked",
+      evidence: { automaticRecovery: { replay } }, nextAction: "Reconcile uncertain effects.",
+    });
+    const payload = payloadKind === "issueId"
+      ? { issueId: sourceId }
+      : { _paperclipWakeContext: { taskId: sourceId } };
+    await db.insert(agentWakeupRequests).values({
+      companyId, agentId, source: "automation", status: "deferred_issue_execution", payload,
+    });
+    if (running) await db.insert(heartbeatRuns).values({
+      companyId, agentId, invocationSource: "on_demand", status: "running", contextSnapshot: { issueId: sourceId },
+    });
+    const { service, wakes } = createService();
+    expect(await service.reconcileTaskWatchdogs({ companyId })).toMatchObject({ triggered });
+    expect(wakes).toHaveLength(triggered);
+    expect(await db.select().from(agentWakeupRequests)).toHaveLength(1);
+    expect((await db.select().from(issueRecoveryActions))[0]?.outcome).toBe("blocked");
+    expect(await service.reconcileTaskWatchdogs({ companyId })).toMatchObject({ triggered: 0 });
+    expect(wakes).toHaveLength(triggered);
+  });
 
   it("creates one reusable watchdog issue and wakes the watchdog on the initial stopped state", async () => {
     const companyId = await seedCompany();

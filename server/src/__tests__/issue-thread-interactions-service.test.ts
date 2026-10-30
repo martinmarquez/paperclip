@@ -2183,6 +2183,39 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
       .toBe("pending");
   });
 
+  it.each(["agent", "user"] as const)("preserves independent %s addressees when replacing a task question", async (kind) => {
+    const fixture = await seedSourceQuestionFixture({});
+    const scope = { id: fixture.issueId, companyId: fixture.companyId };
+    const actor = { agentId: fixture.agentId, runId: fixture.runId };
+    const recipientIds = [randomUUID(), randomUUID()];
+    if (kind === "agent") {
+      await db.insert(agents).values(recipientIds.map(id => ({
+        id, companyId: fixture.companyId, name: "Independent recipient", role: "engineer",
+        status: "idle", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {},
+      })));
+    } else {
+      for (const id of recipientIds) await seedQuestionUser(fixture.companyId, id);
+    }
+    const create = (recipientId?: string) => interactionsSvc.create(scope, {
+      ...questionCreateInput(fixture.runId),
+      ...(kind === "user" ? { resolverPolicy: "human_only" as const } : {}),
+      ...(recipientId ? kind === "agent"
+        ? { addresseeAgentId: recipientId }
+        : { addresseeUserId: recipientId } : {}),
+    }, actor);
+    const first = await create(recipientIds[0]);
+    const independent = await create(recipientIds[1]);
+    const unaddressed = await create();
+    const replacement = await create(recipientIds[0]);
+    const rows = await interactionsSvc.listForIssue(fixture.issueId);
+    expect(rows.find(row => row.id === first.id)).toMatchObject({
+      status: "expired", result: { supersededByInteractionId: replacement.id },
+    });
+    for (const card of [independent, unaddressed, replacement]) {
+      expect(rows.find(row => row.id === card.id)?.status).toBe("pending");
+    }
+  });
+
   it("leaves exactly one pending ask_user_questions on the onboarding first task after probe cards and the real question arrive", async () => {
     const companyId = randomUUID();
     const goalId = randomUUID();

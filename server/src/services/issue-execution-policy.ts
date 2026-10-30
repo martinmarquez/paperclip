@@ -53,6 +53,8 @@ type TransitionInput = {
   commentBody?: string | null;
   reviewRequest?: IssueExecutionState["reviewRequest"] | null;
   monitorExplicitlyUpdated?: boolean;
+  /** Server-verified question wait/response from this assignee/run, not a review handoff. */
+  waitingOnOwnQuestion?: boolean;
 };
 
 type TransitionResult = {
@@ -976,6 +978,17 @@ function applyIssueExecutionStageTransition(input: TransitionInput): TransitionR
   if (requestedStatus === "done" && existingState?.status === COMPLETED_STATUS) {
     return { patch };
   }
+
+  // A task question waits under its implementer. An explicit review request,
+  // reassignment, active stage or Done still follows the ordinary workflow.
+  const assignmentChanges =
+    (input.requestedAssigneePatch.assigneeAgentId !== undefined &&
+      input.requestedAssigneePatch.assigneeAgentId !== (input.issue.assigneeAgentId ?? null)) ||
+    (input.requestedAssigneePatch.assigneeUserId !== undefined &&
+      input.requestedAssigneePatch.assigneeUserId !== (input.issue.assigneeUserId ?? null));
+  if (requestedStatus === "in_review" && input.waitingOnOwnQuestion === true &&
+      principalsEqual(actor, currentAssignee) && !assignmentChanges &&
+      input.reviewRequest == null) return { patch };
 
   let pendingStage =
     existingState?.status === CHANGES_REQUESTED_STATUS && currentStage

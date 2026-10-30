@@ -1,3 +1,4 @@
+import { hasPendingQuestionAddresseeWake } from "../../../services/issue-question-wait.js";
 import { hasConversationContinuationPolicy } from "../../../services/conversation-continuation.js";
 import { getExecutionBlocker } from "../../../services/execution-blocker.js";
 import { getNativeReviewAssignment } from "../../../services/native-runtime/native-review-participant.js";
@@ -134,10 +135,13 @@ function classifyRetryReasonKind(retryReason: string | null): RetryReasonKind {
 
 function buildReviewParticipantFacts(input: {
   isInReview: boolean;
+  expectedStageId?: string | null;
   executionState: ReturnType<typeof parseIssueExecutionState>;
 }): ReviewParticipantFacts {
   const currentParticipant = input.executionState?.currentParticipant ?? null;
   return {
+    ...(input.expectedStageId ? { expectedStageMatches: input.executionState?.status === "pending" &&
+      input.executionState.currentStageId === input.expectedStageId } : {}),
     isInReview: input.isInReview,
     hasParticipant: currentParticipant !== null,
     participantIsAgent: currentParticipant?.type === "agent",
@@ -285,6 +289,7 @@ export function createPostgresRunDispatchAdapter(
     // retries must not query pause holds or dependencies for a retry a
     // budget block or a stale assignment already suppresses.
     const facts: ScheduledRetryFacts = {
+      questionCancellationRequested: Boolean(input.contextSnapshot.nativeQuestionCancellation),
       runId: input.runId,
       runAgentId: input.agentId,
       issueId,
@@ -380,6 +385,7 @@ export function createPostgresRunDispatchAdapter(
     }) ?? buildReviewParticipantFacts({
       isInReview: issue.status === "in_review",
       executionState: parseIssueExecutionState(issue.executionState),
+      expectedStageId: readNonEmptyString(input.contextSnapshot.currentStageId),
     });
 
     // The gate checks a disposition repair's own supersession before it
@@ -528,7 +534,8 @@ export function createPostgresRunDispatchAdapter(
     );
 
     const wakeCommentId = deriveCommentId(context);
-    const isInteractionWake = allowsIssueInteractionWake(
+    const isPendingInteractionAddresseeWake = await hasPendingQuestionAddresseeWake(dbOrTx, input);
+    const isInteractionWake = isPendingInteractionAddresseeWake || allowsIssueInteractionWake(
       context,
       ISSUE_TREE_CONTROL_INTERACTION_WAKE_REASONS,
     );
@@ -584,7 +591,7 @@ export function createPostgresRunDispatchAdapter(
     const retryReasonKind = classifyRetryReasonKind(retryReason);
     // Dependency edges can change after scheduled promotion without changing
     // the displayed status. Read them again under the queued/final issue lock.
-    const readiness = issue && retryReasonKind === "native_safe_replacement"
+    const readiness = issue && (retryReasonKind === "native_safe_replacement" || wakeReason === "interaction_pending")
       ? (await issueService(dbOrTx).listDependencyReadiness(input.companyId, [issueId])).get(issueId)
       : null;
     return {
@@ -596,6 +603,7 @@ export function createPostgresRunDispatchAdapter(
         unresolvedBlockerIssueIds: readiness.unresolvedBlockerIssueIds,
         unresolvedBlockerCount: readiness.unresolvedBlockerCount,
       } : null,
+      questionCancellationRequested: Boolean(context.nativeQuestionCancellation),
       issueFound: issue !== null,
       issueStatus: issue?.status ?? null,
       issueAssigneeAgentId: issue?.assigneeAgentId ?? null,
@@ -605,6 +613,7 @@ export function createPostgresRunDispatchAdapter(
       isConnectionContinuation: (isResolvedInteractionContinuation && context.interactionKind === "connection_intent")
         || context.source === "connection_tools.refreshed",
       isInteractionWake,
+      isPendingInteractionAddresseeWake,
       isAuthorizedSourceScopedRecovery,
       isNonAssigneeWorkspaceBusyRetry: isNonAssigneeWorkspaceBusyRetry(retryReason, context),
       resumeIntent,
@@ -625,6 +634,7 @@ export function createPostgresRunDispatchAdapter(
           }) ?? buildReviewParticipantFacts({
             isInReview: issue.status === "in_review",
             executionState: issue.status === "in_review" ? parseIssueExecutionState(issue.executionState) : null,
+            expectedStageId: readNonEmptyString(context.currentStageId),
           })
         : NO_REVIEW_PARTICIPANT,
     };

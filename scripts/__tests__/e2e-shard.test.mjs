@@ -18,6 +18,21 @@ const trustedPrWorkflowPath = ".github/workflows/pr-trusted.yml";
 const trustedPrWorkflow = path.join(repoRoot, trustedPrWorkflowPath);
 
 const SHARD_COUNT = 8;
+// Both references execute trusted upstream code. The immutable release pin is
+// needed by the maintenance fork; arbitrary refs and PR-owned workflows remain denied.
+const trustedCaller = /^\s+uses: paperclipai\/paperclip\/\.github\/workflows\/pr-trusted\.yml@(master|bba6a45f0d364cfd962ac59b3bdf2426a8222adb)\s*$/m;
+
+test("trusted CI caller accepts only protected upstream master or the installed release", () => {
+  for (const ref of ["master", "bba6a45f0d364cfd962ac59b3bdf2426a8222adb"]) {
+    assert.match(`    uses: paperclipai/paperclip/.github/workflows/pr-trusted.yml@${ref}`, trustedCaller);
+  }
+  for (const caller of [
+    "    uses: ./.github/workflows/pr-trusted.yml",
+    "    uses: third-party/paperclip/.github/workflows/pr-trusted.yml@master",
+    "    uses: paperclipai/paperclip/.github/workflows/pr-trusted.yml@feature/unreviewed",
+    `    uses: paperclipai/paperclip/.github/workflows/pr-trusted.yml@${"0".repeat(40)}`,
+  ]) assert.doesNotMatch(caller, trustedCaller);
+});
 
 function runShard(args) {
   const result = spawnSync(process.execPath, [script, ...args], { cwd: repoRoot, encoding: "utf8" });
@@ -29,10 +44,10 @@ function readTrustedPrWorkflow() {
   const caller = readFileSync(prCallerWorkflow, "utf8");
   assert.match(
     caller,
-    /^\s+uses: paperclipai\/paperclip\/\.github\/workflows\/pr-trusted\.yml@master\s*$/m,
-    "pr.yml must call the trusted workflow from CODEOWNERS-protected master",
+    trustedCaller,
+    "pr.yml must call protected upstream master or the exact installed upstream release",
   );
-  // Validate proposed workflow changes locally; CI executes the merged master version.
+  // Validate the full eight-shard contract; CI executes the trusted upstream ref.
   return readFileSync(trustedPrWorkflow, "utf8");
 }
 

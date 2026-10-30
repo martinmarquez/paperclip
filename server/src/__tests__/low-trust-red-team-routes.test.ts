@@ -1009,10 +1009,15 @@ describeEmbeddedPostgres(
       await db.update(heartbeatRuns).set({ status: "running" }).where(eq(heartbeatRuns.id, systemRun!.id));
       const worker = createApp(db, { ...agentActor(fixture), runId: systemRun!.id });
       expect((await request(worker).get(`/api/issues/${created.body.id}`)).status).toBe(200);
-      // These are the same service calls used by plugin issues.update; no HTTP
-      // cancellation is involved, and the run is deliberately left running.
+      // Service/plugin writes must also confirm Stop before the ownership change.
+      await expect(issueService(db).update(created.body.id, { assigneeAgentId: fixture.agents.collaborator.id }))
+        .rejects.toMatchObject({ details: { code: "issue_reassignment_stop_unconfirmed" } });
+      await db.update(heartbeatRuns).set({ status: "cancelled" }).where(eq(heartbeatRuns.id, systemRun!.id));
       await issueService(db).update(created.body.id, { assigneeAgentId: fixture.agents.collaborator.id });
       await issueService(db).update(created.body.id, { assigneeAgentId: fixture.agents.lowTrust.id });
+      // Simulate a stale provider claiming to resume after Stop and the ABA handoff.
+      // Its old human direction must remain revoked even if it reports running.
+      await db.update(heartbeatRuns).set({ status: "running" }).where(eq(heartbeatRuns.id, systemRun!.id));
       expect([403, 404]).toContain((await request(worker).get(`/api/issues/${created.body.id}`)).status);
       const pluginRun = await heartbeatService(db).wakeup(fixture.agents.lowTrust.id, {
         source: "automation", reason: "issue_commented", requestedByActorType: "user", requestedByActorId: "board-user",

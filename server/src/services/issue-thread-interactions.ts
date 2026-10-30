@@ -154,10 +154,11 @@ type InteractionActor = {
 };
 
 async function assertInteractionRunWriteAllowed(tx: Db, issue: { id: string; companyId: string }, actor: InteractionActor) {
-  if (!actor.agentId || !actor.runId) return;
-  // Keep the same issue -> run lock order as task mutation and checkout.
+  // All actors serialize with retry admission, including Board withdrawal of
+  // a question whose scheduler is creating a successor. Keep issue -> run order.
   await tx.select({ id: issues.id }).from(issues)
     .where(and(eq(issues.id, issue.id), eq(issues.companyId, issue.companyId))).for("update");
+  if (!actor.agentId || !actor.runId) return;
   await assertAgentRunWriteAllowed(tx, issue.companyId, actor);
 }
 
@@ -3696,7 +3697,7 @@ export function issueThreadInteractionService(
           // one so the thread never accumulates stale sibling cards. This covers
           // request_confirmation drafts and ordinary task questions. Agent Chat
           // questions remain answerable in history even when another is asked.
-          // Scoped to the same agent + issue + kind; other actors are untouched.
+          // Task questions also share an addressee; independent role consultations stay pending.
           const canSupersedeSiblingCards =
             options.supersedePendingSiblingInteractions !== false &&
             ((data.kind === "request_confirmation" &&
@@ -3734,7 +3735,12 @@ export function issueThreadInteractionService(
                 eq(issueThreadInteractions.createdByAgentId, actor.agentId),
                 eq(issueThreadInteractions.status, "pending"),
                 ne(issueThreadInteractions.id, row.id),
-
+                data.kind === "ask_user_questions"
+                  ? and(
+                      sql`${issueThreadInteractions.addresseeAgentId} IS NOT DISTINCT FROM ${row.addresseeAgentId}`,
+                      sql`${issueThreadInteractions.addresseeUserId} IS NOT DISTINCT FROM ${row.addresseeUserId}`,
+                    )
+                  : undefined,
               ),
             )
             .returning();

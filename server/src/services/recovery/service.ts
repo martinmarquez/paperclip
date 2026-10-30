@@ -1,3 +1,4 @@
+import { issueThreadInteractionAttentionAgentAllowed } from "../issue-thread-interaction-resolution.js";
 import { isAiAuthenticationBlocked } from "../ai-auth-failure.js";
 import { isNativeWorkspaceExportRepairCause } from "@paperclipai/shared";
 import { settleSlackConversation } from "../slack-conversation-lifecycle.js";
@@ -200,7 +201,8 @@ type RecoveryWakeupOptions = {
   contextSnapshot?: Record<string, unknown>;
   issueStateGuard?: {
     statuses: string[];
-    assigneeAgentId: string;
+    assigneeAgentId: string | null;
+    executionStageId?: string;
   };
 };
 
@@ -1153,6 +1155,26 @@ export function recoveryService(
       .then((rows) => Boolean(rows[0]));
   }
 
+
+  async function getPendingWakeInteractions(companyId: string, issueId: string) {
+    return db
+      .select()
+      .from(issueThreadInteractions)
+      .where(
+        and(
+          eq(issueThreadInteractions.companyId, companyId),
+          eq(issueThreadInteractions.issueId, issueId),
+          eq(issueThreadInteractions.status, "pending"),
+          inArray(issueThreadInteractions.continuationPolicy, [
+            "wake_assignee",
+            "wake_assignee_on_accept",
+          ]),
+        ),
+      )
+      .orderBy(asc(issueThreadInteractions.createdAt), asc(issueThreadInteractions.id))
+      .limit(51);
+  }
+
   /**
    * Pausing an agent does not turn an already committed passive response into
    * stranded work. This only preserves the exact current wait; it grants no
@@ -1900,6 +1922,7 @@ export function recoveryService(
     source: string;
     retryOfRunId?: string | null;
     extraContext?: Record<string, unknown>;
+    issueStateGuard?: RecoveryWakeupOptions["issueStateGuard"];
     /**
      * Out-parameter: set `retryExhausted` when no successor was queued
      * because the failed predecessor has spent its bounded transient retry
@@ -1991,6 +2014,7 @@ export function recoveryService(
             },
           }
         : {}),
+      ...(input.issueStateGuard ? { issueStateGuard: input.issueStateGuard } : {}),
       payload: withRecoveryContext(
         {
           issueId: input.issueId,
@@ -4531,7 +4555,14 @@ export function recoveryService(
         continue;
       }
 
-      if (await hasPendingWakeInteraction(issue.companyId, issue.id)) {
+      const pendingInteractions = await getPendingWakeInteractions(issue.companyId, issue.id);
+      const reviewerQuestions = pendingExecutionState?.currentStageId && participantAgentId === agentId &&
+        pendingInteractions.length > 0 && pendingInteractions.length <= 50 &&
+        pendingInteractions.every(interaction => interaction.kind === "ask_user_questions" &&
+          interaction.addresseeAgentId === agentId &&
+          issueThreadInteractionAttentionAgentAllowed({ agentId, interaction }))
+        ? pendingInteractions : [];
+      if (pendingInteractions.length && !reviewerQuestions.length) {
         result.skipped += 1;
         continue;
       }
@@ -4561,7 +4592,58 @@ export function recoveryService(
         continue;
       }
 
-      const participantLatestRunForRecovery =
+      if (reviewerQuestions.length) {
+        // An addressed question is work for this reviewer, not a human wait.
+        // Recover only its missing initial delivery. Once a run exists, normal
+        // bounded retry/disposition handling owns it; never loop on an answer.
+        const delivered = await db.select({ interactionId: sql<string>`${heartbeatRuns.contextSnapshot}->>'interactionId'` })
+          .from(heartbeatRuns).where(and(
+            eq(heartbeatRuns.companyId, issue.companyId), eq(heartbeatRuns.agentId, agentId),
+            sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issue.id}`,
+            inArray(sql<string>`${heartbeatRuns.contextSnapshot}->>'interactionId'`, reviewerQuestions.map(question => question.id)),
+          ));
+        const deliveredIds = new Set(delivered.map(run => run.interactionId));
+        const reviewerQuestion = reviewerQuestions.find(question => !deliveredIds.has(question.id));
+        if (!agentInvokable || !reviewerQuestion || await isInvocationBudgetBlocked(issue, agentId)) {
+          result.skipped += 1;
+          continue;
+        }
+        const previous = await getLatestIssueRunForAgent(issue.companyId, issue.id, agentId);
+        if (isOperatorCancelledRun(previous, agentId) || (previous &&
+            (await readChatControlRecoveryStop(db, { companyId: issue.companyId, issueId: issue.id,
+              agentId, sourceRunId: previous.id })).kind !== "clear")) {
+          result.operatorCancelExempted += 1;
+          continue;
+        }
+        const queued = await deps.enqueueWakeup(agentId, {
+          source: "automation", triggerDetail: "system", reason: "interaction_pending",
+          requestedByActorType: "system",
+          payload: { issueId: issue.id, interactionId: reviewerQuestion.id,
+            interactionKind: reviewerQuestion.kind, mutation: "interaction",
+            sourceRunId: reviewerQuestion.sourceRunId ?? null, sourceCommentId: reviewerQuestion.sourceCommentId ?? null },
+          contextSnapshot: { issueId: issue.id, taskId: issue.id, interactionId: reviewerQuestion.id,
+            interactionKind: reviewerQuestion.kind, wakeReason: "interaction_pending",
+            source: "issue.interaction.created", currentStageId: pendingExecutionState!.currentStageId,
+            currentStageType: pendingExecutionState!.currentStageType,
+            sourceRunId: reviewerQuestion.sourceRunId ?? null, sourceCommentId: reviewerQuestion.sourceCommentId ?? null,
+            reviewRecoveryInstruction: "Respond to the addressed question and submit the current review-stage decision, or report the exact blocking condition." },
+          issueStateGuard: { statuses: ["in_review"], assigneeAgentId: issue.assigneeAgentId,
+            executionStageId: pendingExecutionState!.currentStageId ?? undefined },
+          // Existing review-path receipt uniqueness also serializes a worker
+          // that races after the first provider turn has already ended.
+          idempotencyKey: `issue_review_path_lost:question:${issue.id}:${pendingExecutionState!.currentStageId}:${reviewerQuestion.id}`,
+        }).catch(error => {
+          if (isUniqueViolation(error, "agent_wakeup_requests_review_path_recovery_idempotency_uq")) return null;
+          throw error;
+        });
+        if (queued) {
+          result.reviewParticipantRequeued += 1;
+          result.issueIds.push(issue.id);
+        } else result.skipped += 1;
+        continue;
+      }
+
+      const participantHistoryLatestRun =
         issue.status === "in_review" && participantAgentId
           ? await getLatestIssueRunForAgent(
               issue.companyId,
@@ -4569,9 +4651,14 @@ export function recoveryService(
               participantAgentId,
             )
           : null;
+      const participantContext = parseObject(participantHistoryLatestRun?.contextSnapshot);
+      const participantStageId = readNonEmptyString(participantContext.currentStageId) ??
+        readNonEmptyString(parseObject(participantContext.executionStage).stageId);
+      const participantLatestRunForRecovery = participantStageId &&
+        participantStageId !== pendingExecutionState?.currentStageId ? null : participantHistoryLatestRun;
       const executionRecoverySource =
         issue.status === "in_review"
-          ? participantLatestRunForRecovery
+          ? participantHistoryLatestRun
           : latestRun;
       if (
         executionRecoverySource?.agentId === agentId &&
@@ -4920,6 +5007,41 @@ export function recoveryService(
           continue;
         }
         const participantLatestRun = participantLatestRunForRecovery;
+
+        // A stage handoff can reach admission before the previous participant's
+        // environment lease finishes releasing. That skipped wake created no
+        // reviewer run to retry. Recover the current stage's first dispatch;
+        // normal admission still owns process/lease, pause and recovery gates.
+        if (!participantLatestRun && agentInvokable && pendingExecutionState.currentStageId) {
+          if (await hasQueuedIssueWake(issue.companyId, issue.id, participantAgentId) ||
+              await isInvocationBudgetBlocked(issue, participantAgentId)) {
+            result.skipped += 1;
+            continue;
+          }
+          const queued = await enqueueStrandedIssueRecovery({
+            issueId: issue.id,
+            agentId: participantAgentId,
+            reason: EXECUTION_REVIEW_PARTICIPANT_RECOVERY_REASON,
+            retryReason: EXECUTION_REVIEW_PARTICIPANT_RECOVERY_REASON,
+            source: "issue.execution_review_initial_recovery",
+            issueStateGuard: {
+              statuses: ["in_review"],
+              assigneeAgentId: issue.assigneeAgentId,
+              executionStageId: pendingExecutionState.currentStageId,
+            },
+            extraContext: {
+              currentStageId: pendingExecutionState.currentStageId,
+              currentStageType: pendingExecutionState.currentStageType,
+              reviewRecoveryInstruction:
+                "The current execution stage has not started. Review the task evidence and submit this stage's decision, or mark the issue blocked with the exact unblock action.",
+            },
+          });
+          if (queued) {
+            result.reviewParticipantRequeued += 1;
+            result.issueIds.push(issue.id);
+          } else result.skipped += 1;
+          continue;
+        }
 
         if (
           !participantLatestRun ||

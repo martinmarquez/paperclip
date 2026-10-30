@@ -564,6 +564,7 @@ export const retryWorkspaceExportSchema = z.object({
 
 export const resolveIssueRecoveryActionSchema = z
   .object({
+    recordOnly: z.literal(true).optional(),
     executionReconciliation: z
       .object({
         runId: z.string().guid(),
@@ -581,6 +582,15 @@ export const resolveIssueRecoveryActionSchema = z
   })
   .strict()
   .superRefine((value, ctx) => {
+    if (value.recordOnly) {
+      if (!value.actionId || value.outcome !== "restored" ||
+          value.executionReconciliation?.actionOutcome !== "not_performed") {
+        ctx.addIssue({ code: z.ZodIssueCode.custom,
+          message: "Recording without continuation requires an exact action and verified unperformed execution",
+          path: ["recordOnly"] });
+      }
+      return;
+    }
     if (value.outcome === "restored") {
       if (
         value.sourceIssueStatus !== "todo" &&

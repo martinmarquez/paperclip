@@ -9,7 +9,7 @@ const CODEX_TRANSIENT_UPSTREAM_RE =
   /(?:we(?:'|’)re\s+currently\s+experiencing\s+high\s+demand|temporary\s+errors|rate[-\s]?limit(?:ed)?|too\s+many\s+requests|\b429\b|server\s+overloaded|service\s+unavailable|try\s+again\s+later)/i;
 const CODEX_REMOTE_COMPACTION_RE = /remote\s+compact\s+task/i;
 const CODEX_USAGE_LIMIT_RE =
-  /you(?:'|’)ve hit your usage limit for .+\.\s+switch to another model now,\s+or try again at\s+([^.!\n]+)(?:[.!]|\n|$)/i;
+  /you(?:'|’)ve hit your usage limit[^\n]{0,1024}?(?:\n[^\n]{0,1024}?)?\btry again at\s+([^.!\n]+)(?:[.!]|\n|$)/i;
 const CODEX_PROVIDER_QUOTA_RE =
   /(?:you(?:'|’)ve hit your usage limit|usage limit|model (?:is )?at capacity|at capacity for this model|capacity limit)/i;
 const CODEX_REFRESH_TOKEN_REUSED_RE =
@@ -293,6 +293,24 @@ function parseLocalClockTime(clockText: string, now: Date): Date | null {
   return retryAt;
 }
 
+function parseDatedLocalReset(text: string, now: Date): Date | null {
+  const match = text.trim().match(/^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2})(?:st|nd|rd|th)?,\s+(\d{4})\s+(\d{1,2}):(\d{2})\s+([ap])m(?:\s*\(([^)]+)\)|\s+([A-Z]{2,5}))?$/i);
+  if (!match) return null;
+  const month = "jan feb mar apr may jun jul aug sep oct nov dec".split(" ").indexOf(match[1]!.toLowerCase());
+  const day = Number(match[2]);
+  const year = Number(match[3]);
+  const hour12 = Number(match[4]);
+  const minute = Number(match[5]);
+  if (hour12 < 1 || hour12 > 12 || minute > 59) return null;
+  const hour = hour12 % 12 + (match[6]!.toLowerCase() === "p" ? 12 : 0);
+  const hint = match[7] ?? match[8];
+  // Match the existing clock-only reset handling in the CLI host's timezone.
+  const timeZone = hint ? normalizeResetTimeZone(hint) : Intl.DateTimeFormat().resolvedOptions().timeZone;
+  if (!timeZone) return null;
+  const retryAt = dateFromTimeZoneWallClock({ year, month: month + 1, day, hour, minute, timeZone });
+  return retryAt && retryAt.getTime() > now.getTime() ? retryAt : null;
+}
+
 export function extractCodexRetryNotBefore(input: {
   stdout?: string | null;
   stderr?: string | null;
@@ -301,7 +319,8 @@ export function extractCodexRetryNotBefore(input: {
   const haystack = buildCodexErrorHaystack(input);
   const usageLimitMatch = haystack.match(CODEX_USAGE_LIMIT_RE);
   if (!usageLimitMatch) return null;
-  return parseLocalClockTime(usageLimitMatch[1] ?? "", now);
+  const reset = usageLimitMatch[1] ?? "";
+  return parseLocalClockTime(reset, now) ?? parseDatedLocalReset(reset, now);
 }
 
 export function isCodexTransientUpstreamError(input: {

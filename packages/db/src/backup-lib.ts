@@ -1,4 +1,4 @@
-import { createReadStream, createWriteStream, existsSync, mkdirSync, readdirSync, statSync, unlinkSync } from "node:fs";
+import { createReadStream, createWriteStream, existsSync, mkdirSync, readdirSync, renameSync, statSync, unlinkSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { spawn } from "node:child_process";
@@ -543,6 +543,7 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
   mkdirSync(opts.backupDir, { recursive: true });
   const sqlFile = resolve(opts.backupDir, `${filenamePrefix}-${timestamp()}.sql`);
   const backupFile = `${sqlFile}.gz`;
+  const pendingBackupFile = `${backupFile}.partial`;
   const writer = createBufferedTextFileWriter(sqlFile);
 
   try {
@@ -552,10 +553,11 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
         await closeSql();
         await runPgDumpBackup({
           connectionString: opts.connectionString,
-          backupFile,
+          backupFile: pendingBackupFile,
           connectTimeout,
         });
         await writer.abort();
+        renameSync(pendingBackupFile, backupFile);
         const sizeBytes = statSync(backupFile).size;
         const prunedCount = pruneOldBackups(opts.backupDir, retention, filenamePrefix);
         return {
@@ -564,6 +566,9 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
           prunedCount,
         };
       } catch (error) {
+        if (existsSync(pendingBackupFile)) {
+          try { unlinkSync(pendingBackupFile); } catch { /* ignore */ }
+        }
         if (existsSync(backupFile)) {
           try { unlinkSync(backupFile); } catch { /* ignore */ }
         }
@@ -1022,8 +1027,9 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
 
     // Compress the SQL file with gzip
     const sqlReadStream = createReadStream(sqlFile);
-    const gzWriteStream = createWriteStream(backupFile);
+    const gzWriteStream = createWriteStream(pendingBackupFile);
     await pipeline(sqlReadStream, createGzip(), gzWriteStream);
+    renameSync(pendingBackupFile, backupFile);
     unlinkSync(sqlFile);
 
     const sizeBytes = statSync(backupFile).size;
@@ -1036,6 +1042,9 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
     };
   } catch (error) {
     await writer.abort();
+    if (existsSync(pendingBackupFile)) {
+      try { unlinkSync(pendingBackupFile); } catch { /* ignore */ }
+    }
     if (existsSync(backupFile)) {
       try { unlinkSync(backupFile); } catch { /* ignore */ }
     }

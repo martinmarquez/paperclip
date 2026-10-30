@@ -1,3 +1,4 @@
+import { canonicalRunTaskId, normalizeTaskUuid, taskRunBinding } from "./task-run-identity.js";
 import { retryIdempotentDatabaseOperation } from "../database-retry.js";
 import { prepareConnectionInstructionDelivery } from "./connection-instructions.js";
 import { resolveAssignedConnectionInstructionsForRun } from "./native-runtime/assigned-mcp-tools.js";
@@ -505,6 +506,7 @@ import {
   instanceSettingsService,
   resolveWorktreeRunExecutionActivation,
 } from "./instance-settings.js";
+import { hasPendingQuestionAddresseeWake } from "./issue-question-wait.js";
 import {
   evaluateExecutionAllowlist,
   isExecutionForcedToKubernetes,
@@ -1257,6 +1259,7 @@ function mergeAdapterRecoveryMetadata(input: {
 }
 const RUNNING_ISSUE_WAKE_REASONS_REQUIRING_FOLLOWUP = new Set([
   CHAT_COMPLETION_WAKE_REASON,
+  "issue_resumed",
   "approval_approved",
   ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
   "issue_recovery_action_restored",
@@ -3781,8 +3784,9 @@ interface WakeupOptions {
   contextSnapshot?: Record<string, unknown>;
   issueStateGuard?: {
     statuses: string[];
-    assigneeAgentId: string;
+    assigneeAgentId: string | null;
     statusVersion?: number;
+    executionStageId?: string;
   };
   /** Keep causally distinct external chat continuations out of an existing run. */
   allowRunCoalescing?: boolean;
@@ -8926,8 +8930,17 @@ export function buildPaperclipTaskMarkdown(input: {
         "",
         `Task plan document ${input.taskPlan.documentId}, revision ${input.taskPlan.revisionNumber} (${input.taskPlan.revisionId}):`,
         "Use this plan as assignment context, including its outcome and acceptance criteria. Follow the current work mode and any required approvals.",
-        fenceTaskText(input.taskPlan.body.trim()),
       );
+      if (input.taskPlan.body.length > 64_000) {
+        // Large plans plus preserved conversation history can exceed the provider's input limit.
+        lines.push(
+          `Plan body (${input.taskPlan.body.length} characters) is deferred, not truncated or summarized.`,
+          `Before implementing or making a decision, read the full plan using the task document tool or GET /api/issues/${issue.id}/documents/plan with your normal task authorization. Verify revision ${input.taskPlan.revisionId}; if it differs, retrieve that revision from GET /api/issues/${issue.id}/documents/plan/revisions. Read in bounded sections when necessary.`,
+          "If the exact revision cannot be read, record that blocker and do not infer requirements, acceptance, or approval. The plan and all conversation history remain unchanged.",
+        );
+      } else {
+        lines.push(fenceTaskText(input.taskPlan.body.trim()));
+      }
     }
   }
   if (ancestors.length > 0) {
@@ -10633,6 +10646,17 @@ export function heartbeatService(
     }, queueId);
   }
 
+  // A terminal no-replay decision requires explicit Board resolution. Preserve
+  // saved inputs without repeatedly claiming them on every scheduling sweep.
+  const noReplayHoldCleared = sql`not exists (
+    select 1 from issue_recovery_actions final_hold
+    where final_hold.company_id = ${agentWakeupRequests.companyId}
+      and final_hold.source_issue_id::text = ${agentWakeupRequests.payload}->>'issueId'
+      and final_hold.status = 'resolved'
+      and final_hold.outcome = 'blocked'
+      and final_hold.evidence->'automaticRecovery'->>'replay' = 'blocked'
+  )`;
+
   async function resumeExecutionWaitComments() {
     if ((await getSchedulingSuppression()).suppressed) return;
     const waits = await db.select({ wake: agentWakeupRequests })
@@ -11204,9 +11228,8 @@ export function heartbeatService(
     run: typeof heartbeatRuns.$inferSelect,
     contextSnapshot: Record<string, unknown>,
   ) {
-    const issueId =
-      readNonEmptyString(contextSnapshot.issueId) ??
-      readNonEmptyString(contextSnapshot.taskId);
+    const issueId = run.nativeIssueId ?? normalizeTaskUuid(contextSnapshot.issueId) ??
+      normalizeTaskUuid(contextSnapshot.taskId);
     const issueContext = issueId
       ? await getIssueExecutionContext(run.companyId, issueId)
       : null;
@@ -15495,7 +15518,13 @@ export function heartbeatService(
         : null;
     const transientRetryNotBefore = transientRecovery?.retryNotBefore ?? null;
     const contextSnapshot = parseObject(run.contextSnapshot);
-    const issueId = readNonEmptyString(contextSnapshot.issueId);
+    let issueId = run.nativeIssueId ?? normalizeTaskUuid(contextSnapshot.issueId) ??
+      normalizeTaskUuid(contextSnapshot.taskId);
+    if (!issueId && run.wakeupRequestId) {
+      const [binding] = await db.select({ issueId: canonicalRunTaskId }).from(heartbeatRuns)
+        .where(and(eq(heartbeatRuns.companyId, run.companyId), eq(heartbeatRuns.id, run.id)));
+      issueId = normalizeTaskUuid(binding?.issueId);
+    }
 
     if (!baseSchedule) {
       const exhaustion = {
@@ -15647,6 +15676,7 @@ export function heartbeatService(
     const retryContextSnapshot: Record<string, unknown> = withRecoveryContext(
       {
         ...contextSnapshot,
+        ...(issueId ? { issueId } : {}),
         executionRetryAccounting: accountingForScheduledRetry(run, retryReason, schedule.attempt),
         retryOfRunId: run.id,
         wakeReason,
@@ -15723,6 +15753,7 @@ export function heartbeatService(
             | "issue_terminal_status"
             | "issue_not_in_progress"
             | "continuation_user_authorization_missing"
+            | "question_cancelled"
             | "issue_execution_lock_changed";
           issueId: string | null;
           details: Record<string, unknown>;
@@ -15999,6 +16030,29 @@ export function heartbeatService(
             };
           }
         }
+
+        if (issueId && !isNonAssigneeWorkspaceBusyRetry(retryReason, contextSnapshot)) {
+          const [owner] = await tx.select({
+            assigneeAgentId: issues.assigneeAgentId, status: issues.status, executionState: issues.executionState,
+          }).from(issues).where(and(eq(issues.companyId, run.companyId), eq(issues.id, issueId)));
+          const review = owner?.status === "in_review" ? parseIssueExecutionState(owner.executionState) : null;
+          const isReviewer = review?.status === "pending" && review.currentParticipant?.type === "agent"
+            && review.currentParticipant.agentId === run.agentId;
+          if (owner && owner.assigneeAgentId !== run.agentId && !isReviewer) return {
+            outcome: "not_scheduled", issueId, errorCode: "issue_reassigned",
+            reason: "Scheduled retry suppressed because issue ownership changed",
+            details: { previousAssigneeAgentId: run.agentId, currentAssigneeAgentId: owner.assigneeAgentId },
+          };
+        }
+
+        const [lockedPredecessor] = await tx.select({ contextSnapshot: heartbeatRuns.contextSnapshot })
+          .from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, run.companyId), eq(heartbeatRuns.id, run.id)))
+          .for("update");
+        if (lockedPredecessor?.contextSnapshot?.[NATIVE_QUESTION_CANCELLATION_CONTEXT_KEY]) return {
+          outcome: "not_scheduled", issueId, errorCode: "question_cancelled",
+          reason: "The question was withdrawn or cancelled before retry dispatch.",
+          details: { sourceRunId: run.id },
+        };
 
         const scheduledRunId = randomUUID();
         if (contextSnapshot.explicitUserContinuation) {
@@ -17524,7 +17578,10 @@ export function heartbeatService(
         !allowsIssueInteractionWake(
           context,
           ISSUE_TREE_CONTROL_INTERACTION_WAKE_REASONS,
-        )
+        ) &&
+        !(await hasPendingQuestionAddresseeWake(db, {
+          companyId: run.companyId, issueId, agentId: run.agentId, contextSnapshot: context,
+        }))
       ) {
         await cancelQueuedRunForBlockedDependencies(
           run,
@@ -19656,6 +19713,89 @@ export function heartbeatService(
     return { reaped: reaped.length, runIds: reaped };
   }
 
+  async function retireLegacyReviewerQuestionNotifications(cutoff: Date | null) {
+    const candidates = await db.select({ id: agentWakeupRequests.id, companyId: agentWakeupRequests.companyId,
+      issueId: issues.id }).from(agentWakeupRequests)
+      .innerJoin(issues, and(eq(issues.companyId, agentWakeupRequests.companyId),
+        sql`${issues.id}::text = ${agentWakeupRequests.payload}->>'issueId'`,
+        eq(issues.status, "in_review"), isNull(issues.hiddenAt), isNull(issues.assigneeUserId),
+        sql`${issues.executionState}->'currentParticipant'->>'agentId' = ${agentWakeupRequests.agentId}::text`))
+      .innerJoin(issueThreadInteractions, and(eq(issueThreadInteractions.companyId, issues.companyId),
+        eq(issueThreadInteractions.issueId, issues.id), eq(issueThreadInteractions.kind, "ask_user_questions"),
+        eq(issueThreadInteractions.addresseeAgentId, agentWakeupRequests.agentId),
+        sql`${issueThreadInteractions.id}::text = ${agentWakeupRequests.payload}->>'interactionId'`))
+      .innerJoin(companies, and(eq(companies.id, issues.companyId), eq(companies.status, "active")))
+      .where(and(noReplayHoldCleared, eq(agentWakeupRequests.status, "deferred_issue_execution"), isNull(agentWakeupRequests.runId),
+        eq(agentWakeupRequests.source, "automation"),
+        sql`${issues.executionState}->>'status' = 'pending'`,
+        sql`${issues.executionState}->'currentParticipant'->>'type' = 'agent'`,
+        sql`coalesce(${issues.executionState}->>'currentStageId', '') <> ''`,
+        sql`${agentWakeupRequests.payload}->>'mutation' = 'interaction'`,
+        sql`${agentWakeupRequests.payload}->>'interactionKind' = 'ask_user_questions'`,
+        sql`${agentWakeupRequests.payload} #>> '{_paperclipWakeContext,interactionKind}' = 'ask_user_questions'`,
+        sql`${agentWakeupRequests.payload}->>'interactionId' = ${agentWakeupRequests.payload} #>> '{_paperclipWakeContext,interactionId}'`,
+        sql`coalesce(${agentWakeupRequests.payload}->>'interactionStatus', '') in ('', 'pending')`,
+        sql`coalesce(${agentWakeupRequests.payload} #>> '{_paperclipWakeContext,interactionStatus}', '') in ('', 'pending')`,
+        ...["wakeCommentId", "commentId", "nativeStatusWakeIntentId", "chatRequestId", "externalChatRequestId"]
+          .flatMap(key => [
+            sql`coalesce(${agentWakeupRequests.payload}->>${key}, '') = ''`,
+            sql`coalesce(${agentWakeupRequests.payload}->'_paperclipWakeContext'->>${key}, '') = ''`,
+          ]),
+        sql`${agentWakeupRequests.payload} #>> '{_paperclipWakeContext,source}' = 'issue.interaction.created'`,
+        sql`${agentWakeupRequests.payload} #>> '{_paperclipWakeContext,wakeReason}' = 'interaction_pending'`,
+        sql`coalesce(${agentWakeupRequests.payload} #> '{_paperclipWakeContext,wakeCommentIds}', '[]'::jsonb) = '[]'::jsonb`,
+        sql`coalesce(${agentWakeupRequests.payload}->>'commentId', '') = ''`,
+        sql`coalesce(${agentWakeupRequests.payload} #>> '{_paperclipWakeContext,wakeCommentId}', '') = ''`,
+        sql`coalesce(${agentWakeupRequests.payload} #>> '{_paperclipWakeContext,commentId}', '') = ''`,
+        sql`${agentWakeupRequests.payload}->'queuedCommentInterrupt' is null`,
+        sql`coalesce(${agentWakeupRequests.payload}->>'manualUserWake', 'false') <> 'true'`,
+        sql`coalesce(${agentWakeupRequests.payload} #>> '{_paperclipWakeContext,nativeStatusWakeIntentId}', '') = ''`,
+        lte(agentWakeupRequests.updatedAt, new Date(Date.now() - 30_000)),
+        cutoff ? gte(agentWakeupRequests.requestedAt, cutoff) : undefined))
+      .orderBy(asc(agentWakeupRequests.updatedAt)).limit(50);
+    for (const candidate of candidates) {
+      try {
+        await db.transaction(async tx => {
+          await tx.execute(sql`select id from issues where id = ${candidate.issueId} and company_id = ${candidate.companyId} for update`);
+          const [issue] = await tx.select().from(issues).where(and(eq(issues.id, candidate.issueId),
+            eq(issues.companyId, candidate.companyId)));
+          const [wake] = await tx.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.id, candidate.id),
+            eq(agentWakeupRequests.companyId, candidate.companyId), noReplayHoldCleared, eq(agentWakeupRequests.status, "deferred_issue_execution"),
+            isNull(agentWakeupRequests.runId))).for("update");
+          if (!wake || !issue || issue.status !== "in_review" || issue.hiddenAt || issue.assigneeUserId) return;
+          const state = parseIssueExecutionState(issue.executionState);
+          const payload = parseObject(wake.payload), context = parseObject(payload[DEFERRED_WAKE_CONTEXT_KEY]);
+          if (state?.status !== "pending" || !state.currentStageId || state.currentParticipant?.type !== "agent" ||
+              state.currentParticipant.agentId !== wake.agentId || wake.source !== "automation" ||
+              !isUuidLike(String(payload.interactionId ?? "")) || payload.interactionKind !== "ask_user_questions" ||
+              context.interactionKind !== "ask_user_questions" || payload.issueId !== issue.id || context.source !== "issue.interaction.created" ||
+              context.wakeReason !== "interaction_pending" || payload.mutation !== "interaction" ||
+              payload.interactionId !== context.interactionId || payload.queuedCommentInterrupt || payload.manualUserWake ||
+              queuedCommentIdsFromWakePayload(payload).length || readNonEmptyString(payload.commentId) ||
+              ["wakeCommentId", "commentId", "nativeStatusWakeIntentId", "chatRequestId", "externalChatRequestId"]
+                .some(key => readNonEmptyString(context[key]) || readNonEmptyString(payload[key])) ||
+              ([payload.interactionStatus, context.interactionStatus].some(status =>
+                readNonEmptyString(status) && status !== "pending"))) return;
+          const [card] = await tx.select().from(issueThreadInteractions).where(and(
+            eq(issueThreadInteractions.id, String(payload.interactionId)), eq(issueThreadInteractions.companyId, issue.companyId),
+            eq(issueThreadInteractions.issueId, issue.id), eq(issueThreadInteractions.kind, "ask_user_questions"),
+            eq(issueThreadInteractions.addresseeAgentId, wake.agentId))).for("update");
+          if (!card) return;
+          // Rotate a policy-blocked card without granting attention authority.
+          const eligible = card.status !== "pending" || await hasPendingQuestionAddresseeWake(tx as unknown as Db, {
+            companyId: issue.companyId, issueId: issue.id, agentId: wake.agentId, contextSnapshot: context,
+          });
+          await tx.update(agentWakeupRequests).set(eligible ? { status: "skipped", finishedAt: new Date(),
+            updatedAt: new Date(), error: "Question saved. The reviewer will continue when the task is ready." }
+            : { updatedAt: new Date() }).where(and(eq(agentWakeupRequests.id, wake.id),
+              eq(agentWakeupRequests.companyId, wake.companyId), eq(agentWakeupRequests.status, "deferred_issue_execution")));
+        });
+      } catch (err) {
+        logger.warn({ err, queueId: candidate.id }, "failed to retire legacy reviewer-question notification");
+      }
+    }
+  }
+
   async function resumeQueuedRuns() {
     if ((await getSchedulingSuppression()).suppressed) return;
     await resumeExecutionWaitComments();
@@ -19758,6 +19898,7 @@ export function heartbeatService(
     for (const agentId of agentIds) {
       await startNextQueuedRunForAgent(agentId);
     }
+    await retireLegacyReviewerQuestionNotifications(cutoff);
   }
 
   async function recoverActiveSessionGoals() {
@@ -24949,18 +25090,37 @@ export function heartbeatService(
                       runtimeEnv.PAPERCLIP_RUNNER_REMOTE_PROVIDER_PACK_PATH?.trim() ||
                       null,
                     stopTaskForReassignment: async (target) => {
-                      await settleLiveRunnerGoalBeforeInterrupt(db, target);
-                      if (!target.runId) return;
-                      const prior = await getRun(target.runId);
-                      if (!prior || prior.companyId !== target.companyId || prior.agentId !== target.agentId) {
+                      if (target.runId) {
+                        const prior = await getRun(target.runId);
+                        if (!prior || prior.companyId !== target.companyId || prior.agentId !== target.agentId) {
+                          throw conflict("Reassignment run binding changed");
+                        }
+                      }
+                      const [task] = await db.select({ checkoutRunId: issues.checkoutRunId,
+                        executionRunId: issues.executionRunId, assigneeAgentId: issues.assigneeAgentId })
+                        .from(issues).where(and(eq(issues.companyId, target.companyId), eq(issues.id, target.issueId)));
+                      if (!task || task.assigneeAgentId !== target.agentId) throw conflict("Reassignment owner changed");
+                      if (task.executionRunId !== target.runId || task.checkoutRunId !== target.checkoutRunId) {
                         throw conflict("Reassignment run binding changed");
                       }
-                      const stopped = await cancelRunInternal(target.runId, "Cancelled for task reassignment", {
-                        errorCode: "issue_reassigned", suppressImmediateRecovery: true,
-                        resultJson: { reassignmentStopConfirmed: true },
-                      });
-                      if (stopped && ["running", "queued", "scheduled_retry"].includes(stopped.status)) {
-                        throw conflict("The previous run did not stop; reassignment was not applied");
+                      await settleLiveRunnerGoalBeforeInterrupt(db, target);
+                      // Only the locked preflight set may be cancelled. A run that
+                      // arrives later is fenced by the ownership transaction.
+                      const pending = target.runIds.length ? await db.select().from(heartbeatRuns).where(and(
+                        eq(heartbeatRuns.agentId, target.agentId),
+                        taskRunBinding({ ...target, executionRunId: target.runId }),
+                        inArray(heartbeatRuns.id, target.runIds),
+                        inArray(heartbeatRuns.status, ["running", "queued", "scheduled_retry"]),
+                      )).orderBy(asc(heartbeatRuns.id)).limit(101) : [];
+                      if (pending.length > 100) throw conflict("Too many pending task runs; inspect before reassignment");
+                      for (const prior of pending) {
+                        const stopped = await cancelRunInternal(prior.id, "Cancelled for task reassignment", {
+                          errorCode: "issue_reassigned", suppressImmediateRecovery: true,
+                          resultJson: { reassignmentStopConfirmed: true },
+                        });
+                        if (!stopped || ["running", "queued", "scheduled_retry"].includes(stopped.status)) {
+                          throw conflict("The previous run did not stop; reassignment was not applied");
+                        }
                       }
                     },
                     enqueueWakeup,
@@ -27747,10 +27907,13 @@ export function heartbeatService(
               statusVersion: issues.statusVersion,
               projectId: issues.projectId,
               projectWorkspaceId: issues.projectWorkspaceId,
+              executionState: issues.executionState,
               executionWorkspaceId: issues.executionWorkspaceId,
               executionWorkspacePreference: issues.executionWorkspacePreference,
               executionWorkspaceSettings: issues.executionWorkspaceSettings,
               assigneeAgentId: issues.assigneeAgentId,
+              assigneeUserId: issues.assigneeUserId,
+              hiddenAt: issues.hiddenAt,
               executionRunId: issues.executionRunId,
               executionAgentNameKey: issues.executionAgentNameKey,
               createdAt: issues.createdAt,
@@ -27922,9 +28085,23 @@ export function heartbeatService(
               }).where(eq(agentWakeupRequests.id, executionWaitRequestId));
               return { kind: "deferred" as const };
             }
-            if (durableRequest || wakeCommentId ||
+            // The pending card is already durable intent. Saving its initial
+            // reviewer notification as live deferred execution would hide it
+            // from assigned-issue recovery after this lease is released.
+            const reviewState = parseIssueExecutionState(issue.executionState);
+            const pendingReviewQuestion = issue.status === "in_review" && !issue.assigneeUserId && !issue.hiddenAt &&
+              !durableRequest && !wakeCommentId && queuedCommentIdsFromRunContext(enrichedContextSnapshot).length === 0 &&
+              !readNonEmptyString(enrichedContextSnapshot.nativeStatusWakeIntentId) &&
+              reviewState?.status === "pending" && reviewState.currentStageId &&
+              reviewState.currentParticipant?.type === "agent" &&
+              reviewState.currentParticipant.agentId === agentId &&
+              await hasPendingQuestionAddresseeWake(tx as unknown as Db, {
+                companyId: issue.companyId, issueId: issue.id, agentId,
+                contextSnapshot: enrichedContextSnapshot,
+              });
+            if (!pendingReviewQuestion && (durableRequest || wakeCommentId ||
                 hasInteractionContinuationWakeContext(enrichedContextSnapshot) ||
-                readNonEmptyString(enrichedContextSnapshot.nativeStatusWakeIntentId)) {
+                readNonEmptyString(enrichedContextSnapshot.nativeStatusWakeIntentId))) {
               await tx.insert(agentWakeupRequests).values({
                 ...durableReceiptFields,
                 companyId: agent.companyId, agentId, source, triggerDetail, reason,
@@ -27944,7 +28121,7 @@ export function heartbeatService(
               });
             } else {
               await recordExecutionWait(tx as unknown as Db, {
-                issueId: issue.id, condition, coalesce: coalesceExecutionWait,
+                issueId: issue.id, condition, coalesce: coalesceExecutionWait || Boolean(pendingReviewQuestion),
                 request: {
                   ...durableReceiptFields,
                   companyId: agent.companyId, agentId, source, triggerDetail,
@@ -27981,11 +28158,18 @@ export function heartbeatService(
           }))) return deferBlockedExecution(executionBlocker);
 
           const issueStateGuard = opts.issueStateGuard;
+          const guardedExecutionState = issueStateGuard?.executionStageId
+            ? parseIssueExecutionState(issue.executionState) : null;
           if (
             issueStateGuard &&
             (!issueStateGuard.statuses.includes(issue.status) ||
               issue.assigneeAgentId !== issueStateGuard.assigneeAgentId ||
-              (issueStateGuard.statusVersion !== undefined && issue.statusVersion !== issueStateGuard.statusVersion))
+              (issueStateGuard.statusVersion !== undefined && issue.statusVersion !== issueStateGuard.statusVersion) ||
+              (issueStateGuard.executionStageId !== undefined &&
+                (guardedExecutionState?.status !== "pending" ||
+                  guardedExecutionState.currentStageId !== issueStateGuard.executionStageId ||
+                  guardedExecutionState.currentParticipant?.type !== "agent" ||
+                  guardedExecutionState.currentParticipant.agentId !== agentId)))
           ) {
             await tx.insert(agentWakeupRequests).values({
               ...durableReceiptFields,
@@ -28302,10 +28486,13 @@ export function heartbeatService(
           const blockedInteractionWake =
             dependencyReadiness &&
             !dependencyReadiness.isDependencyReady &&
-            allowsIssueInteractionWake(
+            (allowsIssueInteractionWake(
               enrichedContextSnapshot,
               ISSUE_TREE_CONTROL_INTERACTION_WAKE_REASONS,
-            );
+            ) || await hasPendingQuestionAddresseeWake(tx as unknown as Db, {
+              companyId: issue.companyId, issueId: issue.id, agentId,
+              contextSnapshot: enrichedContextSnapshot,
+            }));
 
           if (blockedInteractionWake) {
             enrichedContextSnapshot.dependencyBlockedInteraction = true;
@@ -30560,17 +30747,22 @@ export function heartbeatService(
       return run ?? null;
     },
 
-    getActiveRunForAgent: async (agentId: string) => {
+    getActiveRunForAgent: async (agentId: string, task?: {
+      companyId: string; issueId: string; executionRunId?: string | null; checkoutRunId?: string | null; includePending?: boolean;
+    }) => {
       const [run] = await db
         .select()
         .from(heartbeatRuns)
         .where(
           and(
             eq(heartbeatRuns.agentId, agentId),
-            eq(heartbeatRuns.status, "running"),
+            task?.includePending
+              ? inArray(heartbeatRuns.status, ["running", "queued", "scheduled_retry"])
+              : eq(heartbeatRuns.status, "running"),
+            task ? taskRunBinding(task) : undefined,
           ),
         )
-        .orderBy(desc(heartbeatRuns.startedAt))
+        .orderBy(desc(heartbeatRuns.startedAt), asc(heartbeatRuns.id))
         .limit(1);
       return run ?? null;
     },

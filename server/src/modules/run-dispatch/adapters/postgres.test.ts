@@ -13,10 +13,11 @@ import {
   issueDocuments,
   issueRelations,
   issueRecoveryActions,
+  issueThreadInteractions,
   issueTreeHolds,
   issues,
 } from "@paperclipai/db";
-import { ISSUE_CONTINUATION_SUMMARY_DOCUMENT_KEY } from "@paperclipai/shared";
+import { ISSUE_CONTINUATION_SUMMARY_DOCUMENT_KEY, type AskUserQuestionsPayload, type IssueThreadInteractionCanonicalResolverPolicy } from "@paperclipai/shared";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -584,6 +585,80 @@ describeEmbeddedPostgres("run-dispatch postgres adapter", () => {
       expect(persisted?.contextSnapshot).toMatchObject({
         paperclipWake: { privateTestMarker: "not-for-the-status-effect" },
       });
+    });
+
+    it.each([
+      { name: "addressed pending question", allowed: true },
+      { name: "question during review", allowed: true, inReview: true },
+      { name: "terminal issue", allowed: false, terminal: true },
+      { name: "resolved question", allowed: false, status: "resolved" },
+      { name: "human-only question", allowed: false, policy: "human_only" },
+      { name: "different addressee", allowed: false, wrongAddressee: true },
+      { name: "different issue", allowed: false, wrongIssue: true },
+      { name: "approval interaction", allowed: false, kind: "approval" },
+      { name: "ordinary wake with an interaction ID", allowed: false, reason: "issue_assigned" },
+      { name: "missing interaction", allowed: false, missing: true },
+      { name: "malformed interaction ID", allowed: false, malformed: true },
+      { name: "concurrent question supersession", allowed: false, race: true },
+    ] as const)("validates persisted authority for $name", async (testCase: {
+      name: string; allowed: boolean; kind?: string; status?: string; reason?: string;
+      policy?: IssueThreadInteractionCanonicalResolverPolicy;
+      inReview?: true; terminal?: true; wrongAddressee?: true; wrongIssue?: true;
+      missing?: true; malformed?: true; race?: true;
+    }) => {
+      const { companyId, agentId } = await seedCompanyAndAgent();
+      const ownerId = randomUUID();
+      await seedAgent({ id: ownerId, companyId, name: "Implementation owner" });
+      const issueId = randomUUID(), otherIssueId = randomUUID(), interactionId = randomUUID();
+      await seedIssue({ companyId, issueId,
+        status: "terminal" in testCase ? "done" : "inReview" in testCase ? "in_review" : "in_progress",
+        assigneeAgentId: ownerId,
+        executionState: "inReview" in testCase ? { status: "pending", currentStageId: randomUUID(),
+          currentStageIndex: 0, currentStageType: "review",
+          currentParticipant: { type: "agent", agentId: ownerId, userId: null },
+          returnAssignee: { type: "agent", agentId: ownerId, userId: null },
+          reviewRequest: null, completedStageIds: [], lastDecisionId: null, lastDecisionOutcome: null } : null,
+      });
+      await seedIssue({ companyId, issueId: otherIssueId, status: "in_progress", assigneeAgentId: ownerId });
+      const payload: AskUserQuestionsPayload = { version: 1, questions: [{ id: "scope", prompt: "Which scope?", selectionMode: "single", options: [{ id: "continue", label: "Continue" }] }] };
+      if (!("missing" in testCase)) await db.insert(issueThreadInteractions).values({
+        id: interactionId, companyId, issueId: "wrongIssue" in testCase ? otherIssueId : issueId,
+        kind: testCase.kind ?? "ask_user_questions",
+        status: testCase.status ?? "pending",
+        effectiveResolverPolicy: testCase.policy ?? "anyone",
+        addresseeAgentId: "wrongAddressee" in testCase ? ownerId : agentId,
+        createdByAgentId: ownerId,
+        payload,
+      });
+      const runId = await seedRun({ companyId, agentId, contextSnapshot: {
+        issueId, interactionId: "malformed" in testCase ? "not-a-uuid" : interactionId, source: "issue.interaction.created",
+        wakeReason: "reason" in testCase ? testCase.reason : "interaction_pending",
+      } });
+      let release = () => {}, ready = () => {};
+      const started = new Promise<void>((resolve) => { ready = resolve; });
+      const finish = new Promise<void>((resolve) => { release = resolve; });
+      const holder = "race" in testCase ? db.transaction(async (tx) => {
+        await tx.update(issueThreadInteractions).set({ status: "expired" }).where(eq(issueThreadInteractions.id, interactionId));
+        ready();
+        await finish;
+      }) : null;
+      if (holder) await started;
+      let settled = false;
+      const dispatch = createPostgresRunDispatchAdapter(db).cancelStaleQueuedRun({
+        runId, companyId, expectedStatus: "queued", now: new Date(),
+      }).finally(() => { settled = true; });
+      if (holder) {
+        try {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+          expect(settled).toBe(false);
+        } finally { release(); await holder; }
+      }
+      const outcome = await dispatch;
+      expect(outcome).toMatchObject(testCase.allowed ? { outcome: "not_stale" }
+        : { outcome: "cancelled", errorCode: "terminal" in testCase ? "issue_terminal_status" : "issue_assignee_changed" });
+      const [issue] = await db.select().from(issues).where(eq(issues.id, issueId));
+      expect(issue.assigneeAgentId).toBe(ownerId);
+      expect(issue.executionState).toEqual("inReview" in testCase ? expect.objectContaining({ status: "pending", lastDecisionId: null }) : null);
     });
 
     it("maps a reassigned issue into a stale queued-run decision", async () => {

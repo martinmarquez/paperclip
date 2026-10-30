@@ -1,7 +1,9 @@
+import { inspectDatabaseBackupHealth, isDatabaseBackupDue } from "./services/database-backup-health.js";
 import { cloudWarmStandbyServerOptions } from "./middleware/cloud-warm-standby.js";
 import { createCloudWarmStandby } from "./services/cloud-warm-standby.js";
 import { subscribeAllCompanyLiveEvents } from "./services/live-events.js";
 import { chatCompletionDeliveryService } from "./services/chat-completion-delivery.js";
+import { createHeartbeatRecoverySweep } from "./services/heartbeat-recovery-sweep.js";
 /// <reference path="./types/express.d.ts" />
 // Kicks off the OTel bootstrap as early as possible (no-op unless
 // OTEL_EXPORTER_OTLP_ENDPOINT is set). startServer() awaits
@@ -1644,6 +1646,50 @@ async function startServerWithDatabaseTeardown(
     };
     await runRetentionSweep();
 
+    const sweepHeartbeatRecovery = createHeartbeatRecoverySweep([
+      ["orphaned_runs", () => heartbeat.reapOrphanedRuns({ staleThresholdMs: 5 * 60 * 1000 })],
+      ["scheduled_retries", async () => {
+        const promotion = await heartbeat.promoteDueScheduledRetries();
+        if (promotion.promoted > 0) {
+          logger.warn({ promotedScheduledRetries: promotion.promoted, promotedScheduledRetryRunIds: promotion.runIds },
+            "periodic heartbeat recovery promoted scheduled retries");
+        }
+      }],
+      ["queued_runs", () => heartbeat.resumeQueuedRuns()],
+      ["assigned_issues", async () => {
+        const reconciled = await heartbeat.reconcileStrandedAssignedIssues();
+        if (reconciled.assignmentDispatched > 0 || reconciled.dispatchRequeued > 0 ||
+          reconciled.continuationRequeued > 0 || reconciled.successfulRunHandoffEscalated > 0 ||
+          reconciled.successfulRunHandoffRetried > 0 || reconciled.escalated > 0) {
+          logger.warn(reconciled, "periodic heartbeat recovery changed assigned issue state");
+        }
+      }],
+      ["dependency_wakes", async () => {
+        const reconciled = await heartbeat.reconcileResolvedDependencyWakes();
+        if (reconciled.healed > 0) {
+          logger.warn(reconciled, "periodic dependency-wake reconciliation restored task execution paths");
+        }
+      }],
+      ["task_watchdogs", async () => {
+        const reconciled = await heartbeat.reconcileTaskWatchdogs();
+        if (reconciled.triggered > 0) {
+          logger.warn(reconciled, "periodic task-watchdog reconciliation triggered watchdog work");
+        }
+      }],
+      ["silent_runs", async () => {
+        const scanned = await heartbeat.scanSilentActiveRuns();
+        if (scanned.created > 0 || scanned.escalated > 0) {
+          logger.warn(scanned, "periodic active-run output watchdog created review work");
+        }
+      }],
+      ["stale_locks", async () => {
+        const swept = await heartbeat.sweepStaleIssueLocks();
+        if (swept.cleared > 0) {
+          logger.warn(swept, "periodic stale-lock sweeper cleared issue locks");
+        }
+      }],
+    ], (err, queue) => { logger.error({ err, queue }, "periodic heartbeat recovery queue failed"); });
+
     startHeartbeatSchedulerInterval(() => {
       // Track the outer async callback as well as the work it starts. Shutdown
       // can then wait through an already-running suppression check before it
@@ -1781,54 +1827,7 @@ async function startServerWithDatabaseTeardown(
         if (!(await heartbeat.resolveSchedulingSuppression()).suppressed) {
           // Periodically reap orphaned runs (5-min staleness threshold) and make sure
           // persisted queued work is still being driven forward.
-          trackHeartbeatSchedulerWork(heartbeat
-            .reapOrphanedRuns({ staleThresholdMs: 5 * 60 * 1000 })
-            .then(() => heartbeat.promoteDueScheduledRetries())
-            .then(async (promotion) => {
-              await heartbeat.resumeQueuedRuns();
-              const reconciled = await heartbeat.reconcileStrandedAssignedIssues();
-              if (
-                promotion.promoted > 0 ||
-                reconciled.assignmentDispatched > 0 ||
-                reconciled.dispatchRequeued > 0 ||
-                reconciled.continuationRequeued > 0 ||
-                reconciled.successfulRunHandoffEscalated > 0 ||
-                reconciled.successfulRunHandoffRetried > 0 ||
-                reconciled.escalated > 0
-              ) {
-                logger.warn(
-                  { promotedScheduledRetries: promotion.promoted, promotedScheduledRetryRunIds: promotion.runIds, ...reconciled },
-                  "periodic heartbeat recovery changed assigned issue state",
-                );
-              }
-            })
-            .then(async () => {
-              const reconciled = await heartbeat.reconcileResolvedDependencyWakes();
-              if (reconciled.healed > 0) {
-                logger.warn({ ...reconciled }, "periodic dependency-wake reconciliation restored task execution paths");
-              }
-            })
-            .then(async () => {
-              const reconciled = await heartbeat.reconcileTaskWatchdogs();
-              if (reconciled.triggered > 0) {
-                logger.warn({ ...reconciled }, "periodic task-watchdog reconciliation triggered watchdog work");
-              }
-            })
-            .then(async () => {
-              const scanned = await heartbeat.scanSilentActiveRuns();
-              if (scanned.created > 0 || scanned.escalated > 0) {
-                logger.warn({ ...scanned }, "periodic active-run output watchdog created review work");
-              }
-            })
-            .then(async () => {
-              const swept = await heartbeat.sweepStaleIssueLocks();
-              if (swept.cleared > 0) {
-                logger.warn({ ...swept }, "periodic stale-lock sweeper cleared issue locks");
-              }
-            })
-            .catch((err) => {
-              logger.error({ err }, "periodic heartbeat recovery failed");
-            }));
+          for (const work of sweepHeartbeatRecovery()) trackHeartbeatSchedulerWork(work);
         }
       })().catch((err) => {
         logger.error({ err }, "heartbeat scheduler tick failed");
@@ -1859,12 +1858,21 @@ async function startServerWithDatabaseTeardown(
       },
       "Automatic database backups enabled",
     );
-    setInterval(() => {
-      if (isWarmStandby()) return;
+    let lastBackupAttemptAtMs: number | null = null;
+    const runDueDatabaseBackup = () => {
+      if (isWarmStandby() || databaseBackupInFlight) return;
+      const nowMs = Date.now();
+      const health = inspectDatabaseBackupHealth({ enabled: true, backupDir: config.databaseBackupDir,
+        maxAgeHours: databaseBackupMaxAgeHours, filenamePrefix: "paperclip" });
+      if (!isDatabaseBackupDue({ latestBackupMtime: health.latestBackup?.mtime ?? null,
+        lastAttemptAtMs: lastBackupAttemptAtMs, intervalMs: backupIntervalMs, nowMs })) return;
+      lastBackupAttemptAtMs = nowMs;
       void runServerDatabaseBackup("scheduled").catch(() => {
-        // runServerDatabaseBackup already logs the failure with context.
+        // Preserve the configured retry cadence after a failed backup too.
       });
-    }, backupIntervalMs);
+    };
+    runDueDatabaseBackup();
+    setInterval(runDueDatabaseBackup, Math.min(60_000, backupIntervalMs));
   }
   
   // Wait for external adapters to finish loading before accepting requests.

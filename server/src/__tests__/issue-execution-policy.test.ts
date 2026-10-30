@@ -2085,3 +2085,74 @@ describe("review round circuit breaker", () => {
     });
   });
 });
+
+
+describe("pending question waits preserve review policy", () => {
+  function waitInput() {
+    const policy = twoStagePolicy();
+    return { issue: { status: "in_progress", assigneeAgentId: coderAgentId, assigneeUserId: null,
+      executionPolicy: policy, executionState: null }, policy, requestedStatus: "in_review",
+      requestedAssigneePatch: {}, actor: { agentId: coderAgentId }, waitingOnOwnQuestion: true,
+      commentBody: "Waiting for the addressed question" };
+  }
+
+  it("keeps the implementer while waiting, without completing a stage", () => {
+    const input = waitInput();
+    const result = applyIssueExecutionPolicyTransition(input);
+    expect(result.patch.assigneeAgentId).toBeUndefined();
+    expect(result.patch.executionState).toBeUndefined();
+    expect(result.decision).toBeUndefined();
+    expect(input.policy.stages).toHaveLength(2);
+  });
+
+  it.each(["done", "in_review"])("still starts review for an explicit %s handoff", (requestedStatus) => {
+    const input = waitInput();
+    const result = applyIssueExecutionPolicyTransition({ ...input, requestedStatus,
+      ...(requestedStatus === "in_review" ? { reviewRequest: { instructions: "Review this candidate" } } : {}) });
+    expect(result.patch.assigneeAgentId).toBe(qaAgentId);
+    expect(result.patch.executionState).toMatchObject({ status: "pending", currentStageType: "review" });
+    expect(result.decision).toBeUndefined();
+  });
+
+  it("does not defer without server-verified question evidence", () => {
+    const result = applyIssueExecutionPolicyTransition({ ...waitInput(), waitingOnOwnQuestion: false });
+    expect(result.patch.assigneeAgentId).toBe(qaAgentId);
+  });
+
+  it.each([
+    { assigneeAgentId: coderAgentId },
+    { assigneeAgentId: coderAgentId, assigneeUserId: null },
+    { assigneeUserId: null },
+  ])("keeps question waits when the assignee patch is a no-op: %j", (requestedAssigneePatch) => {
+    const result = applyIssueExecutionPolicyTransition({ ...waitInput(), requestedAssigneePatch, reviewRequest: null });
+    expect(result.patch.assigneeAgentId).toBeUndefined();
+    expect(result.patch.executionState).toBeUndefined();
+    expect(result.decision).toBeUndefined();
+  });
+
+  it("does not defer an explicit reassignment", () => {
+    const result = applyIssueExecutionPolicyTransition({ ...waitInput(), requestedAssigneePatch: { assigneeAgentId: qaAgentId } });
+    expect(result.patch.assigneeAgentId).toBe(qaAgentId);
+  });
+
+  it("preserves a changes-requested state while the implementer waits", () => {
+    const input = waitInput();
+    const state = { status: "changes_requested" as const, currentStageId: input.policy.stages[0].id,
+      currentStageIndex: 0, currentStageType: "review" as const,
+      currentParticipant: { type: "agent" as const, agentId: qaAgentId },
+      returnAssignee: { type: "agent" as const, agentId: coderAgentId }, completedStageIds: [],
+      lastDecisionId: null, lastDecisionOutcome: "changes_requested" as const, changesRequestedCount: 1 };
+    const result = applyIssueExecutionPolicyTransition({ ...input, issue: { ...input.issue, executionState: state } });
+    expect(result.patch.executionState).toBeUndefined();
+    expect(result.patch.assigneeAgentId).toBeUndefined();
+    expect(state.changesRequestedCount).toBe(1);
+  });
+
+  it("does not permit the executor to advance an active reviewer stage", () => {
+    const input = waitInput();
+    const pending = applyIssueExecutionPolicyTransition({ ...input, waitingOnOwnQuestion: false }).patch.executionState;
+    expect(() => applyIssueExecutionPolicyTransition({ ...input, requestedStatus: "done",
+      issue: { ...input.issue, status: "in_review", assigneeAgentId: qaAgentId, executionState: pending as IssueExecutionState },
+    })).toThrow("Only the active reviewer or approver");
+  });
+});

@@ -10,6 +10,7 @@ import {
   issueDocuments,
   issueApprovals,
   issueRelations,
+  issueRecoveryActions,
   issues,
   issueThreadInteractions,
   issueWatchdogs,
@@ -23,6 +24,7 @@ import { evaluateAgentInvokabilityFromDb } from "./agent-invokability.js";
 import { issueService } from "./issues.js";
 import { visibleIssueCondition } from "./issue-visibility.js";
 import { TASK_WATCHDOG_ORIGIN_KIND } from "./task-watchdog-scope.js";
+import { executionBlockerPredicate } from "./execution-blocker.js";
 
 const TASK_WATCHDOG_STOP_FINGERPRINT_PREFIX = "task_watchdog_stop:";
 const TASK_WATCHDOG_SUBTREE_MAX_DEPTH = 100;
@@ -858,6 +860,18 @@ export async function upsertIssueWatchdogForIssue(
 }
 
 export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) {
+  // A saved wake behind an execution hold cannot make the subtree live.
+  const executableWake = sql`not exists (
+    select 1 from ${issueRecoveryActions}
+    where ${issueRecoveryActions.companyId} = ${agentWakeupRequests.companyId}
+      and ${issueRecoveryActions.sourceIssueId}::text = coalesce(
+        nullif(${agentWakeupRequests.payload}->>'issueId', ''),
+        nullif(${agentWakeupRequests.payload}->>'taskId', ''),
+        nullif(${agentWakeupRequests.payload}->'_paperclipWakeContext'->>'issueId', ''),
+        nullif(${agentWakeupRequests.payload}->'_paperclipWakeContext'->>'taskId', '')
+      )
+      and ${executionBlockerPredicate()}
+  )`;
   const issuesSvc = issueService(db);
 
   async function loadWatchdogSubtreeIssues(companyId: string, watchedIssueId: string) {
@@ -992,6 +1006,7 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
         .where(and(
           eq(agentWakeupRequests.companyId, companyId),
           inArray(agentWakeupRequests.status, [...TASK_WATCHDOG_WAKE_REQUEST_STATUSES]),
+          executableWake,
           or(
             inArray(sql`${agentWakeupRequests.payload}->>'issueId'`, subtreeIssueIds),
             inArray(sql`${agentWakeupRequests.payload}->>'taskId'`, subtreeIssueIds),
@@ -1208,6 +1223,7 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
         .where(and(
           eq(agentWakeupRequests.companyId, companyId),
           inArray(agentWakeupRequests.status, [...TASK_WATCHDOG_WAKE_REQUEST_STATUSES]),
+          executableWake,
           sql`(${agentWakeupRequests.payload}->>'issueId' = ${issueId}
             OR ${agentWakeupRequests.payload}->>'taskId' = ${issueId}
             OR ${agentWakeupRequests.payload}->'_paperclipWakeContext'->>'issueId' = ${issueId}

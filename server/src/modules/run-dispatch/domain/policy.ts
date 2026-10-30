@@ -40,6 +40,8 @@ export type DispositionRepairFacts = {
 };
 
 export type ReviewParticipantFacts = {
+  /** False when a stage-bound run outlived its exact pending stage. */
+  expectedStageMatches?: boolean;
   isInReview: boolean;
   hasParticipant: boolean;
   participantIsAgent: boolean;
@@ -49,6 +51,7 @@ export type ReviewParticipantFacts = {
 };
 
 export type ScheduledRetryGateErrorCode =
+  | "question_cancelled"
   | "agent_not_invokable"
   | "heartbeat_wake_on_demand_disabled"
   | "budget_blocked"
@@ -76,6 +79,7 @@ export type GateDecision =
     };
 
 export type ScheduledRetryFacts = {
+  questionCancellationRequested?: boolean;
   runId: string;
   runAgentId: string;
   issueId: string | null;
@@ -108,6 +112,7 @@ export type ScheduledRetryFacts = {
 };
 
 export type QueuedRunStalenessErrorCode =
+  | "question_cancelled"
   | "execution_reconciliation_required"
   | "issue_dependencies_blocked"
   | "issue_not_found"
@@ -129,6 +134,7 @@ export type StalenessDecision =
     };
 
 export type QueuedRunFacts = {
+  questionCancellationRequested?: boolean;
   /** Rechecked for automatic native replacements immediately before dispatch. */
   dependenciesBlocked?: DependencyBlockFacts | null;
   runId: string;
@@ -146,6 +152,8 @@ export type QueuedRunFacts = {
   /** A connection resolution or tool refresh can resume an agent waiting in review. */
   isConnectionContinuation?: boolean;
   isInteractionWake: boolean;
+  /** Server-verified pending question addressed to this agent; never an approval. */
+  isPendingInteractionAddresseeWake?: boolean;
   isAuthorizedSourceScopedRecovery: boolean;
   isNonAssigneeWorkspaceBusyRetry: boolean;
 
@@ -241,11 +249,12 @@ type ReviewParticipantOutcome = "ok" | "participant_changed";
 /**
  * Decides whether the current review participant still matches the run's
  * agent. An issue with no assigned participant, or one not in review, never
- * blocks here.
+ * blocks here unless the run is bound to an obsolete execution stage.
  */
 function decideReviewParticipant(
   facts: ReviewParticipantCheckFacts,
 ): ReviewParticipantOutcome {
+  if (facts.expectedStageMatches === false) return "participant_changed";
   if (!facts.isInReview || !facts.hasParticipant) return "ok";
   const participantMatches =
     facts.participantIsAgent && facts.participantAgentId === facts.runAgentId;
@@ -262,6 +271,10 @@ export function decideScheduledRetryGate(
   facts: ScheduledRetryFacts,
   _now: Date,
 ): GateDecision {
+  if (facts.questionCancellationRequested) return {
+    allowed: false, errorCode: "question_cancelled", issueId: facts.issueId,
+    reason: "The question was withdrawn or cancelled before retry dispatch.", details: {},
+  };
   if (facts.budgetBlock) {
     return {
       allowed: false,
@@ -436,7 +449,7 @@ export function decideScheduledRetryGate(
     return {
       allowed: false,
       reason:
-        "Scheduled retry suppressed because the issue is waiting on another review participant",
+        "Scheduled retry suppressed because the review stage or participant changed",
       errorCode: "issue_review_participant_changed",
       issueId: facts.issueId,
       details: {
@@ -498,6 +511,10 @@ export function decideQueuedRunStaleness(
   facts: QueuedRunFacts,
   _now: Date,
 ): StalenessDecision {
+  if (facts.questionCancellationRequested) return {
+    stale: true, errorCode: "question_cancelled",
+    reason: "The question was withdrawn or cancelled before queued dispatch.", details: {},
+  };
   if (!facts.issueFound) {
     return {
       stale: true,
@@ -586,9 +603,12 @@ export function decideQueuedRunStaleness(
     };
   }
 
-  if (facts.retryReasonKind === "native_safe_replacement" && facts.dependenciesBlocked) {
+  if (facts.dependenciesBlocked && (facts.retryReasonKind === "native_safe_replacement" ||
+      (facts.wakeReason === "interaction_pending" && !facts.isPendingInteractionAddresseeWake))) {
     return { stale: true, errorCode: "issue_dependencies_blocked",
-      reason: "Cancelled because issue dependencies became blocked before replacement dispatch",
+      reason: facts.retryReasonKind === "native_safe_replacement"
+        ? "Cancelled because issue dependencies became blocked before replacement dispatch"
+        : "Cancelled because the pending question is unavailable and task dependencies are still blocked",
       details: { issueId: facts.issueId,
         unresolvedBlockerIssueIds: facts.dependenciesBlocked.unresolvedBlockerIssueIds,
         unresolvedBlockerCount: facts.dependenciesBlocked.unresolvedBlockerCount } };
@@ -661,14 +681,14 @@ export function decideQueuedRunStaleness(
   const participantOutcome = decideReviewParticipant({
     ...facts.reviewParticipant,
     runAgentId: facts.runAgentId,
-    bypass: facts.wakeCommentIdPresent,
+    bypass: facts.wakeCommentIdPresent || facts.isPendingInteractionAddresseeWake === true,
   });
   if (participantOutcome === "participant_changed") {
     return {
       stale: true,
       errorCode: "issue_review_participant_changed",
       reason:
-        "Cancelled because the in-review participant changed before the queued run could start; the current participant will be woken instead",
+        "Cancelled because the review stage or participant changed before the queued run could start; the current participant will be woken instead",
       details: {
         issueId: facts.issueId,
         currentStageType: facts.reviewParticipant.currentStageType,

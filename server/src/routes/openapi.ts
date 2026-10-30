@@ -432,8 +432,16 @@ function applyNumberChecks(
 }
 
 function zodToOpenApiSchema(schema: z.ZodTypeAny): JsonSchema {
-  const unwrapped = unwrapSchema(schema);
-  const def = zodDef(unwrapped);
+  const def = zodDef(schema);
+  // Retain defaults while unwrapping request schemas. In particular, clients
+  // must see that omitting dryRun selects preflight rather than a mutation.
+  if (def.type === "default") {
+    return { ...zodToOpenApiSchema(def.innerType as z.ZodTypeAny), default: def.defaultValue };
+  }
+  if (def.type === "optional" || def.type === "catch") {
+    return zodToOpenApiSchema(def.innerType as z.ZodTypeAny);
+  }
+  if (def.type === "pipe") return zodToOpenApiSchema(def.in as z.ZodTypeAny);
   const typeName = def.type;
 
   if (typeName === "string") {
@@ -475,10 +483,16 @@ function zodToOpenApiSchema(schema: z.ZodTypeAny): JsonSchema {
   }
 
   if (typeName === "array") {
-    return {
+    const jsonSchema: JsonSchema = {
       type: "array",
       items: zodToOpenApiSchema(def.element as z.ZodTypeAny),
     };
+    for (const check of (def.checks as unknown[]) ?? []) {
+      const constraint = checkDef(check);
+      if (constraint?.check === "min_length") jsonSchema.minItems = constraint.minimum;
+      if (constraint?.check === "max_length") jsonSchema.maxItems = constraint.maximum;
+    }
+    return jsonSchema;
   }
 
   if (typeName === "record") {
@@ -1359,6 +1373,8 @@ const BOARD_ONLY_OPERATIONS = new Set([
   "POST /api/companies/{companyId}/ai-connection-pools",
   "DELETE /api/companies/{companyId}/ai-connection-pools/{poolId}",
   "GET /api/companies/{companyId}/ai-connection-pools/{poolId}/inspection",
+  "GET /api/companies/{companyId}/ai-connection-pools/{poolId}/task-pins/{agentId}/{taskKey}",
+  "POST /api/companies/{companyId}/ai-connection-pools/{poolId}/task-pins/release",
 
   "GET /api/companies/{companyId}/project-repositories",
   "PUT /api/projects/{id}/repositories",
@@ -10424,6 +10440,41 @@ registerCurrentRoute({
   tags: ["ai-connections"],
   summary: "Inspect authorized pool members and fresh cached usage without probing",
   responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/companies/{companyId}/ai-connection-pools/{poolId}/task-pins/{agentId}/{taskKey}",
+  tags: ["ai-connections"],
+  summary: "Inspect the exact allocation receipt for a scoped router repair",
+  description: "Requires a Board actor with manage-connections permission in the company. Returns allocation identity and the current local hostname, without provider credentials.",
+  request: { params: z.object({ companyId: z.string().uuid(), poolId: z.string().uuid(), agentId: z.string().uuid(), taskKey: z.string().uuid() }) },
+  responses: {
+    200: { ...r.ok(), headers: { "Cache-Control": { schema: { type: "string", enum: ["no-store"] } } } },
+    400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound,
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/companies/{companyId}/ai-connection-pools/{poolId}/task-pins/release",
+  tags: ["ai-connections"],
+  summary: "Preflight or release one orphaned task allocation after an audited scoped reset",
+  description: "Requires a Board actor with manage-connections permission. Preflight is the default and changes nothing. Exact allocation identity, absent task context and settled execution are required. Historical local process IDs also require independent operator verification of the original host and server-observed process absence. The operation starts no work and preserves the current owner's unclaimed retry.",
+  request: {
+    params: z.object({ companyId: z.string().uuid(), poolId: z.string().uuid() }),
+    body: jsonBody(z.object({
+      agentId: z.string().uuid(), taskKey: z.string().uuid(), expectedPinId: z.string().uuid(),
+      expectedMemberId: z.string().min(1).max(160), expectedRevision: z.number().int().positive(),
+      resetActivityId: z.string().uuid(), dryRun: z.boolean().default(true),
+      expectedLocalHost: z.string().min(1).max(255).optional(),
+      localOriginVerifications: z.array(z.object({
+        runId: z.string().uuid(), leaseId: z.string().uuid(), sourceHost: z.string().min(1).max(255),
+        evidence: z.string().trim().min(80).max(4000),
+      }).strict()).max(100).optional(),
+    }).strict()),
+  },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict },
 });
 
 registerCurrentRoute({

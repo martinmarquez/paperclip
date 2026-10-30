@@ -806,6 +806,16 @@ The reusable watchdog issue is a child of the watched source issue for audit and
 
 Task watchdog evaluation is conservative. If any included issue has a live run, queued wake, or scheduled retry that should fire without intervention, the subtree is live and the task watchdog does not run.
 
+A saved wake behind an effective execution-recovery hold is not a live path, including when its recovery record is resolved but retains a no-replay disposition. The watchdog may inspect that stopped state; the hold and saved messages remain intact, and normal admission still controls any continuation.
+
+Periodic heartbeat recovery runs each durable queue independently. A failing or
+hanging orphan reaper must not suppress scheduled retries, queued work,
+dependency recovery, watchdogs or stale-lock checks. Each queue is single-flight;
+completed or failed sweeps become eligible on the next scheduler tick. Existing
+retry budgets, backoff, ownership, pause, approval and execution-hold gates still
+decide whether work may resume. Recovery scheduling is not permission to replay
+an action with an unknown outcome.
+
 If no included issue has a live path, Paperclip computes a stop fingerprint from durable subtree state, including at least:
 
 - included leaf issue ids, statuses, assignees, and latest durable update timestamps
@@ -1601,3 +1611,83 @@ use the same activity projection. Board-owned repairs stay actionable until a
 verified native retry actually starts. Once an explicit board retry is running,
 its live activity takes precedence over the prior owner and exhausted budget.
 Resolved and cancelled actions remain resolved.
+
+### Large task plans
+
+Assignment prompts inline plans up to 64,000 characters. Larger plans are
+delivered by document and revision reference so a fresh continuation can retain
+its conversation history without exceeding the provider's input limit. The
+agent must read the complete exact revision through the ordinary authorized
+task-document path before implementation or a decision. An unavailable revision
+is a blocker, never approval or permission to infer missing requirements. This
+changes delivery only: stored plans, history, work modes and approval gates stay
+intact.
+
+### Explicit continuation wakes
+
+Disposition repair recognizes active native runs by their persisted native task
+binding, even when the legacy context snapshot is missing or stale. Scheduling
+copies this canonical task into a retry placeholder's legacy context. Historical
+legacy placeholders still require their own correct same-company task context;
+repair does not infer their task from an unrelated ancestor. An active run does
+not grant another owner permission to dispatch duplicate recovery work.
+
+Withdrawing or cancelling a native question records cancellation intent for a
+same-task scheduled retry as well as a queued or running turn. Legacy successors
+must retain a matching task context. The existing post-commit
+path and recovery sweep consume that intent. Company, task, native runtime and
+question identity checks remain required; historical legacy questions do not
+acquire native execution authority.
+
+An agent that reports a blocker owned by itself is already aware of that blocker; recording it does not send an immediate `issue_unblock_requested` wake back to the reporting agent. Board requests and blockers delegated to another agent still notify their owner. Waiting on another issue requires a first-class blocker relation; prose in an unblock descriptor does not create that dependency.
+
+Reporter identity comes from the authenticated agent actor, not an audit run header. A Board request remains a Board request even if it includes `X-Paperclip-Run-Id`; that caller-supplied trace does not authenticate an agent. Local CLI agents that need agent semantics must use their agent credentials.
+
+Wake diagnostics preserve the authenticated agent's own `agentId` even without `company_scope:read`, so it can recognize an existing continuation. Other agents' IDs, run IDs and activity IDs retain their normal redaction. This exception applies only to the authorized issue's `/diagnostics/wakes` response.
+
+Explicit same-owner `issue_resumed` wakes requested during a running turn are
+deferred until that turn releases the issue, rather than merged into the turn
+they are supposed to follow. Dispatch admission gates still apply; generic
+pings keep their coalescing behavior. Ordinary wake keys do not guarantee
+single delivery after promotion: do not blindly resend an ambiguous request.
+Confirm the persisted receipt through wake diagnostics; a deferred-looking
+response or the current execution ID alone does not prove a successor exists.
+
+
+### Reassignment and pending executions
+
+An assignment-only update must stop the previous owner's task runs in all three
+active states: `running`, `queued`, and `scheduled_retry`. The HTTP path and the
+native reassignment callback use the existing run cancellation lifecycle before
+changing the owner. They suppress immediate recovery of the stopped task. A failed
+Stop leaves ownership unchanged. Stops stay outside the assignment transaction so
+provider cleanup cannot deadlock on the task row.
+
+The issue service then locks the task row and refuses the assignment if another
+old-owner run remains or appeared during Stop. This fence also applies to service
+and plugin writes. It does not cancel another owner's run or unrelated task work.
+Native task identity takes precedence over UUID aliases in legacy `issueId`/`taskId`
+and wake payloads. Non-UUID session keys do not become task bindings. The execution and checkout pointers remain distinct fallbacks when the run has
+no task identity. Company and old-owner scope remain mandatory.
+
+Generic failure retries recheck ownership under the scheduler's task-row lock
+before insertion. This check retains the existing current-review-participant and
+non-assignee workspace-wait exceptions. It does not change retry budgets, account
+selection, pause gates or provider termination rules. A concurrent run that
+prevents the handoff produces a conflict for a fresh decision; the control plane
+does not force the ownership write.
+
+Before Stop, the HTTP handoff checks that comment attachments belong to the same
+task and company. The comment transaction still checks and locks the actual
+binding. If Stop succeeds but the ownership update fails, the HTTP path requests
+a guarded wake only for the unchanged runnable prior owner and state version.
+A newer owner, version, status or live checkout/execution claim prevents that wake.
+An accepted goal pause/clear is recorded before confirmation polling, so failed
+confirmation can also request guarded recovery; rejected actions cannot.
+The native path captures pending run IDs and both bindings during its locked
+preflight. Stop rejects changed bindings and cancels only that captured set;
+new arrivals remain untouched and prevent the transfer through the transaction
+fence. Rollback can recognize a stopped retry with no execution pointer or with
+terminal checkout/execution references. Its existing
+state-guarded compensation continues to respect newer ownership and manual holds.
+Neither path overrides a budget, pause, review or execution-reconciliation gate.

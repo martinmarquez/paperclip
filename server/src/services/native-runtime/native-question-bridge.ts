@@ -26,6 +26,7 @@ import { parseQuestionInteractionAnswers, parseSavedQuestionInteractionAnswers }
 const QUESTION_KEY_PREFIX = "paperclip-runner-question:";
 const REQUEST_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/;
 export const NATIVE_QUESTION_CANCELLATION_CONTEXT_KEY = "nativeQuestionCancellation";
+const CANCELLABLE_QUESTION_RUN_STATUSES = ["queued", "running", "scheduled_retry"] as const;
 
 type QueueCommand = (
   type: string,
@@ -110,6 +111,22 @@ async function authorizedNativeRun(
     eq(heartbeatRuns.runtimeMode, "native"),
   )).limit(1).then((rows) => rows[0] ?? null);
   return run ? { ...run, requestId } : null;
+}
+
+// The scheduler creates legacy placeholders before selecting a native runtime.
+// Authorize through the original native question, never through placeholder input.
+function questionRunLineage(run: { id: string; companyId: string; agentId: string; issueId: string | null }) {
+  return sql`with recursive question_runs(id) as (
+    select ${run.id}::uuid
+    union
+    select retry.id from ${heartbeatRuns} retry
+    join question_runs parent on retry.retry_of_run_id = parent.id
+    where retry.company_id = ${run.companyId}::uuid
+      and retry.agent_id = ${run.agentId}::uuid
+      and coalesce(retry.native_issue_id::text,
+        case when jsonb_typeof(retry.context_snapshot -> 'issueId') = 'string'
+          then retry.context_snapshot ->> 'issueId' end) = ${run.issueId}
+  ) select id from question_runs`;
 }
 
 /** Materialize questions; permission requests use the privileged runtime card. */
@@ -326,7 +343,11 @@ export async function nativeQuestionRunToCancel(
   interaction: NativeQuestionAuthorizationIdentity,
 ): Promise<string | null> {
   const run = await authorizedNativeRun(db, interaction);
-  return run && ["queued", "running"].includes(run.status) ? run.id : null;
+  if (!run) return null;
+  return db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
+    sql`${heartbeatRuns.id} in (${questionRunLineage(run)})`,
+    inArray(heartbeatRuns.status, [...CANCELLABLE_QUESTION_RUN_STATUSES]),
+  )).limit(1).then((rows) => rows[0]?.id ?? null);
 }
 
 /**
@@ -341,14 +362,14 @@ export async function requestNativeQuestionRunCancellation(
   cause: NativeQuestionCancellationCause,
 ): Promise<string | null> {
   const run = await authorizedNativeRun(db, interaction);
-  if (!run || !["queued", "running"].includes(run.status)) return null;
+  if (!run) return null;
   const marker = JSON.stringify({
     version: 1,
     issueId: interaction.issueId,
     ...cause,
     requestedAt: new Date().toISOString(),
   });
-  return db.update(heartbeatRuns).set({
+  const cancellationPatch = {
     contextSnapshot: sql`jsonb_set(
       case
         when jsonb_typeof(${heartbeatRuns.contextSnapshot}) = 'object'
@@ -360,13 +381,21 @@ export async function requestNativeQuestionRunCancellation(
       true
     )`,
     updatedAt: new Date(),
-  }).where(and(
+  };
+  // Fence scheduling on the predecessor before reading its descendants. A
+  // concurrent scheduler either commits first (and is included below), or sees
+  // this intent under its predecessor lock and cannot create a new retry.
+  const fenced = await db.update(heartbeatRuns).set(cancellationPatch).where(and(
     eq(heartbeatRuns.id, run.id),
     eq(heartbeatRuns.companyId, interaction.companyId),
     eq(heartbeatRuns.nativeIssueId, interaction.issueId),
     eq(heartbeatRuns.runtimeMode, "native"),
-    inArray(heartbeatRuns.status, ["queued", "running"]),
-  )).returning({ id: heartbeatRuns.id }).then((rows) => rows[0]?.id ?? null);
+  )).returning({ id: heartbeatRuns.id });
+  if (fenced.length === 0) return null;
+  const marked = await db.update(heartbeatRuns).set(cancellationPatch).where(
+    sql`${heartbeatRuns.id} in (${questionRunLineage(run)})`,
+  ).returning({ id: heartbeatRuns.id, status: heartbeatRuns.status });
+  return marked.find((row) => CANCELLABLE_QUESTION_RUN_STATUSES.some((status) => status === row.status))?.id ?? null;
 }
 
 /** Capture the minimum bound identity needed to cancel after the issue transaction commits. */
