@@ -728,6 +728,25 @@ describeEmbeddedPostgres("native question bridge", () => {
     expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.retryOfRunId, runId))).toHaveLength(0);
   });
 
+  it("holds the task admission lock during an operator's question withdrawal", async () => {
+    await seed();
+    const interaction = await projectNativeRuntimeRequest({ db, binding: binding(), event: runtimeRequestEvent() });
+    await issueThreadInteractionService(db).withdrawInteraction(
+      { id: issueId, companyId }, interaction!.id, { reason: "No longer needed" }, { userId: "operator-1" },
+      { afterResolveInTransaction: async (tx, withdrawn) => {
+        // A different connection must not claim the task between card
+        // withdrawal and cancellation of its retry lineage.
+        let lockError: unknown;
+        try {
+          await db.execute(sql`select id from ${issues} where id = ${issueId} for update nowait`);
+        } catch (error) { lockError = error; }
+        const error = lockError as { code?: string; cause?: { code?: string } } | undefined;
+        expect(error?.cause?.code ?? error?.code).toBe("55P03");
+        await requestNativeQuestionRunCancellation(tx, withdrawn, { kind: "interaction_withdrawn", interactionId: withdrawn.id });
+      } },
+    );
+  });
+
   it("keeps legacy execution association scoped to the same company", async () => {
     await seed();
     const [issue] = await db.select().from(issues).where(eq(issues.id, issueId));

@@ -154,10 +154,11 @@ type InteractionActor = {
 };
 
 async function assertInteractionRunWriteAllowed(tx: Db, issue: { id: string; companyId: string }, actor: InteractionActor) {
-  if (!actor.agentId || !actor.runId) return;
-  // Keep the same issue -> run lock order as task mutation and checkout.
+  // All actors serialize with retry admission, including Board withdrawal of
+  // a question whose scheduler is creating a successor. Keep issue -> run order.
   await tx.select({ id: issues.id }).from(issues)
     .where(and(eq(issues.id, issue.id), eq(issues.companyId, issue.companyId))).for("update");
+  if (!actor.agentId || !actor.runId) return;
   await assertAgentRunWriteAllowed(tx, issue.companyId, actor);
 }
 
