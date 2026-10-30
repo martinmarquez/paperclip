@@ -131,3 +131,50 @@ control for routing. With a test agent already bound to a saved pool, they also 
 the **Used by** list, avatars and profile links. Cleanup archives only the test's own pool and verifies that existing
 accounts and pools remain intact. This suite does not execute agents or probe
 live usage; provider and restart acceptance remain separate gated test drives.
+
+## Explicit repair after a scoped context reset
+
+Ordinary turns, resets and restarts retain account affinity. A Board operator
+with manage-connections permission can separately release one orphaned task pin
+after a recorded scoped context reset. This is not automatic account rotation.
+
+Read the minimal allocation receipt through
+`GET /api/companies/:companyId/ai-connection-pools/:poolId/task-pins/:agentId/:taskKey`;
+it exposes pin/member IDs and pool revision, never provider credentials.
+Use `POST /api/companies/:companyId/ai-connection-pools/:poolId/task-pins/release`
+with `agentId`, canonical issue UUID `taskKey`, `expectedPinId`,
+`expectedMemberId`, `expectedRevision`, and `resetActivityId`. The request defaults
+to `dryRun: true`; a successful preflight changes nothing. Revalidate the receipt
+and send the same request with `dryRun: false` only for the approved repair.
+
+The server checks the same-company task and current owner, exact allocation and
+pool revision, a user-authored scoped reset after that allocation, absent task
+sessions (UUID and issue-identifier aliases), settled execution/recovery and
+cleanup. Queued/running executions block release. A scheduled retry may remain
+only if it is a legacy placeholder with no claim, provider/session/binding or
+retained launch evidence. Terminal status alone is not termination proof.
+Reconciliation receipts must have a server-recorded timestamp after the latest
+execution evidence; updating recovery bookkeeping does not refresh that proof.
+
+A historical local run can retain its PID after normal completion. The operator
+must verify the original execution host and supply `expectedLocalHost`. The
+historical lease lacks an immutable machine fingerprint: matching today's host
+does not prove the execution's original machine. Supply
+`localOriginVerifications` with exact run/lease IDs, `sourceHost` and independently
+verified operational evidence of the same original host and instance history.
+Without that evidence, do not perform the repair. The receipt labels this as an
+operator verification, separate from the server's physical process observation.
+The server requires that host plus the run's exact persisted local environment/lease
+binding, released cleanup, and physical absence of both PID and process group.
+It uses signal zero only and records its observations in the repair receipt,
+without clearing historical process fields. A live/reused PID or an unknown
+ownership result blocks repair. Remote process numbers are never probed locally.
+Missing or contradictory evidence fails closed.
+
+The transaction releases only that pin and records an audit receipt. Repeating
+the request returns the receipt without deleting a replacement allocation. It
+preserves other pins, pool cursor/configuration, grants, quotas, context and the
+scheduled retry's identity and time. It selects no member and starts no work.
+Inspect and, if authorized, advance the existing retry through its normal native
+operation separately. Never replay a withdrawn question or override an unknown
+outcome hold to repair affinity.

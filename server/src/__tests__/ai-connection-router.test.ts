@@ -1,10 +1,13 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { and, eq } from "drizzle-orm";
-import { createDb, companies, agents, companyMemberships, connectionGrants, plugins, aiConnectionRouterCursors, aiConnectionTaskPins, toolConnections, companySecrets, heartbeatRuns, issues } from "@paperclipai/db";
+import { createDb, companies, agents, companyMemberships, connectionGrants, plugins, aiConnectionRouterCursors, aiConnectionTaskPins, toolConnections, companySecrets, heartbeatRuns, issues, issueRecoveryActions, activityLog, agentTaskSessions, agentWakeupRequests, heartbeatRunEvents, environmentLeases } from "@paperclipai/db";
+import { releaseOrphanedRouterPin } from "../services/orphaned-router-pin.js";
 import { startEmbeddedPostgresTestDatabase } from "@paperclipai/db/test-embedded-postgres";
 import type { AiConnectionPoolMember, AiConnectionRouterRequest, AiConnectionRouterResult, PaperclipPluginManifestV1 } from "@paperclipai/shared";
 import { aiConnectionRouterService, AiConnectionPoolExhausted, poolMemberRuntimeConfig, applyAiConnectionRouterTaskSettings } from "../services/ai-connection-router.js";
@@ -160,6 +163,185 @@ describe("durable, authorized connection routing", () => {
     expect(many.filter(s => s.memberId === members[0]!.id)).toHaveLength(4);
     const pins = await db.select().from(aiConnectionTaskPins).where(eq(aiConnectionTaskPins.poolId, pool.id)); expect(pins).toHaveLength(9);
     const [cursor] = await db.select().from(aiConnectionRouterCursors).where(eq(aiConnectionRouterCursors.poolId, pool.id)); expect(cursor?.version).toBe(9);
+  });
+
+  let orphanFixtureNumber = 100_000;
+  async function orphanedPinFixture() {
+    const pool = await makePool();
+    const [task] = await db.insert(issues).values({ companyId, identifier: `RTF-${orphanFixtureNumber++}`, title: "Reset routing fixture", assigneeAgentId: agentId }).returning();
+    await resolve(pool.id, task.id);
+    await resolve(pool.id, "preserved-other-task");
+    const [pin] = await db.select().from(aiConnectionTaskPins).where(and(eq(aiConnectionTaskPins.poolId, pool.id), eq(aiConnectionTaskPins.taskKey, task.id)));
+    await db.update(aiConnectionTaskPins).set({ createdAt: new Date(Date.now() - 60_000) }).where(eq(aiConnectionTaskPins.id, pin!.id));
+    const [reset] = await db.insert(activityLog).values({
+      companyId, actorType: "user", actorId: "alice", action: "agent.runtime_session_reset",
+      entityType: "agent", entityId: agentId, details: { taskKey: task.id },
+    }).returning();
+    return {
+      task, pool, pin: pin!, input: {
+        companyId, poolId: pool.id, agentId, taskKey: task.id,
+        expectedPinId: pin!.id, expectedMemberId: pin!.member.id, expectedRevision: pool.revision,
+        resetActivityId: reset!.id, actorId: "alice", dryRun: false,
+      },
+    };
+  }
+
+  it("preflights and releases only a reset task's orphaned pin without changing its valid retry", async () => {
+    const { task, pool, pin, input } = await orphanedPinFixture();
+    const beforePins = await db.select().from(aiConnectionTaskPins).where(eq(aiConnectionTaskPins.poolId, pool.id));
+    const beforeCursor = await db.select().from(aiConnectionRouterCursors).where(eq(aiConnectionRouterCursors.poolId, pool.id));
+    const [retry] = await db.insert(heartbeatRuns).values({
+      companyId, agentId, status: "scheduled_retry", contextSnapshot: { issueId: task.id, aiRouterTaskKey: task.id },
+      scheduledRetryAt: new Date(Date.now() + 3_600_000),
+    }).returning();
+    expect(await releaseOrphanedRouterPin(db, { ...input, dryRun: true })).toMatchObject({
+      released: false, eligible: true, scheduledRetryIdsPreserved: [retry!.id], dispatch: "not_requested",
+    });
+    expect(await db.select().from(aiConnectionTaskPins).where(eq(aiConnectionTaskPins.poolId, pool.id))).toEqual(beforePins);
+    expect(await releaseOrphanedRouterPin(db, input)).toMatchObject({ released: true, pinId: pin.id });
+    expect(await db.select().from(aiConnectionTaskPins).where(eq(aiConnectionTaskPins.poolId, pool.id))).toEqual(beforePins.filter(row => row.id !== pin.id));
+    expect(await db.select().from(aiConnectionRouterCursors).where(eq(aiConnectionRouterCursors.poolId, pool.id))).toEqual(beforeCursor);
+    expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, retry!.id)))[0]).toEqual(retry);
+    expect(await releaseOrphanedRouterPin(db, input)).toMatchObject({ released: true, alreadyReleased: true });
+    for (const mismatch of [
+      { expectedMemberId: randomUUID() }, { poolId: randomUUID() }, { agentId: secondAgentId },
+      { resetActivityId: randomUUID() }, { expectedRevision: input.expectedRevision + 1 },
+    ]) await expect(releaseOrphanedRouterPin(db, { ...input, ...mismatch })).rejects.toThrow();
+    const receipts = await db.select().from(activityLog).where(and(eq(activityLog.entityId, pin.id), eq(activityLog.action, "ai_connection.orphaned_task_pin_released")));
+    expect(receipts).toHaveLength(1);
+    await db.update(heartbeatRuns).set({ status: "cancelled" }).where(eq(heartbeatRuns.id, retry!.id));
+  });
+
+  it.each(["queued", "running", "bound_retry", "launch_evidence"])("retains the pin for %s execution", async (kind) => {
+    const { task, pin, input } = await orphanedPinFixture();
+    const [run] = await db.insert(heartbeatRuns).values({
+      companyId, agentId, status: ["queued", "running"].includes(kind) ? kind : "scheduled_retry",
+      contextSnapshot: { issueId: task.id, ...(kind === "bound_retry" ? { aiRouterSelection: { poolId: input.poolId } } : {}) },
+    }).returning();
+    if (kind === "launch_evidence") await db.insert(heartbeatRunEvents).values({
+      companyId, agentId, runId: run!.id, seq: 1, eventType: "adapter.invoke", stream: "system", level: "info", message: "Fixture launch",
+    });
+    await expect(releaseOrphanedRouterPin(db, input)).rejects.toThrow(/unclaimed retry|execution evidence/);
+    expect(await db.select().from(aiConnectionTaskPins).where(eq(aiConnectionTaskPins.id, pin.id))).toHaveLength(1);
+    await db.update(heartbeatRuns).set({ status: "cancelled" }).where(eq(heartbeatRuns.id, run!.id));
+  });
+
+  it.each(["taskKey", "taskId", "identifier", "wake_payload"])("finds active execution through %s binding", async (kind) => {
+    const { task, pin, input } = await orphanedPinFixture();
+    const [wake] = kind === "wake_payload" ? await db.insert(agentWakeupRequests).values({
+      companyId, agentId, source: "automation", triggerDetail: "system", reason: "fixture", status: "claimed", payload: { taskId: task.id },
+    }).returning() : [];
+    const [run] = await db.insert(heartbeatRuns).values({
+      companyId, agentId, status: "running", wakeupRequestId: wake?.id,
+      contextSnapshot: kind === "wake_payload" ? {} : { [kind === "identifier" ? "taskKey" : kind]: kind === "identifier" ? task.identifier : task.id },
+    }).returning();
+    await expect(releaseOrphanedRouterPin(db, input)).rejects.toThrow("unclaimed retry");
+    expect(await db.select().from(aiConnectionTaskPins).where(eq(aiConnectionTaskPins.id, pin.id))).toHaveLength(1);
+    await db.update(heartbeatRuns).set({ status: "cancelled" }).where(eq(heartbeatRuns.id, run!.id));
+  });
+
+  it.each(["live_pid", "unclosed_launch"])("rejects a terminal run with %s even without a recovery action", async (kind) => {
+    const { task, pin, input } = await orphanedPinFixture();
+    const [run] = await db.insert(heartbeatRuns).values({
+      companyId, agentId, status: "cancelled", contextSnapshot: { taskKey: task.id },
+      ...(kind === "live_pid" ? { processPid: process.pid } : {}),
+    }).returning();
+    if (kind === "unclosed_launch") await db.insert(heartbeatRunEvents).values({
+      companyId, agentId, runId: run!.id, seq: 1, eventType: "adapter.invoke", stream: "system", level: "info", message: "Fixture launch without stop",
+    });
+    await expect(releaseOrphanedRouterPin(db, input)).rejects.toThrow(/process ownership|verified termination/);
+    expect(await db.select().from(aiConnectionTaskPins).where(eq(aiConnectionTaskPins.id, pin.id))).toHaveLength(1);
+  });
+
+  it.skipIf(process.platform === "win32")("verifies physical absence for a local successful run without erasing its historical PID", async () => {
+    const { task, input } = await orphanedPinFixture();
+    const child = spawn(process.execPath, ["-e", ""], { detached: true, stdio: "ignore" });
+    const pid = child.pid!;
+    await once(child, "close");
+    const leaseId = randomUUID();
+    const [run] = await db.insert(heartbeatRuns).values({
+      companyId, agentId, status: "succeeded", exitCode: 0, processPid: pid, processGroupId: pid,
+      finishedAt: new Date(), contextSnapshot: { taskKey: task.id, paperclipEnvironment: { driver: "local", provider: "local", leaseId } },
+    }).returning();
+    await db.insert(environmentLeases).values({ id: leaseId, companyId, heartbeatRunId: run!.id, provider: "local", status: "released", releasedAt: new Date() });
+    await db.insert(heartbeatRunEvents).values({ companyId, agentId, runId: run!.id, seq: 1, eventType: "adapter.invoke" });
+    await expect(releaseOrphanedRouterPin(db, input)).rejects.toThrow("exact local host");
+    await expect(releaseOrphanedRouterPin(db, { ...input, expectedLocalHost: "another-host" })).rejects.toThrow("exact local host");
+    await expect(releaseOrphanedRouterPin(db, { ...input, expectedLocalHost: os.hostname() })).rejects.toThrow("original execution host");
+    const localOriginVerifications = [{ runId: run!.id, leaseId, sourceHost: os.hostname(),
+      evidence: "The test spawned this exact child on this host and awaited its close event; the fixture preserves its run and lease identity without a host migration." }];
+    expect(await releaseOrphanedRouterPin(db, { ...input, expectedLocalHost: os.hostname(), localOriginVerifications })).toMatchObject({
+      released: true, localTerminationProofs: [{ runId: run!.id, pid, processGroupId: pid, proof: "process_and_group_absent" }],
+    });
+    expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, run!.id)))[0]).toEqual(run);
+  });
+
+  it("rejects a live or reused local PID despite a successful historical status", async () => {
+    const { task, input } = await orphanedPinFixture();
+    const leaseId = randomUUID();
+    const [run] = await db.insert(heartbeatRuns).values({
+      companyId, agentId, status: "succeeded", exitCode: 0, processPid: process.pid, processGroupId: process.pid,
+      processStartedAt: new Date(0), finishedAt: new Date(),
+      contextSnapshot: { taskKey: task.id, paperclipEnvironment: { driver: "local", provider: "local", leaseId } },
+    }).returning();
+    await db.insert(environmentLeases).values({ id: leaseId, companyId, heartbeatRunId: run!.id, provider: "local", status: "released", releasedAt: new Date() });
+    await expect(releaseOrphanedRouterPin(db, { ...input, expectedLocalHost: os.hostname(), localOriginVerifications: [{
+      runId: run!.id, leaseId, sourceHost: os.hostname(),
+      evidence: "This fixture deliberately uses the current test process PID with an old timestamp to represent a live or reused process on the verified local host.",
+    }] })).rejects.toThrow("still live or its PID was reused");
+  });
+
+  it("does not refresh an old termination receipt through recovery bookkeeping", async () => {
+    const { task, input } = await orphanedPinFixture();
+    const [run] = await db.insert(heartbeatRuns).values({ companyId, agentId, status: "cancelled", contextSnapshot: { taskKey: task.id } }).returning();
+    const launchAt = new Date(Date.now() - 1000);
+    await db.insert(heartbeatRunEvents).values({
+      companyId, agentId, runId: run!.id, seq: 1, eventType: "adapter.invoke", createdAt: launchAt,
+    });
+    const receipt = { runId: run!.id, providerStopped: true, actionOutcome: "not_performed", recordedAt: new Date(launchAt.getTime() - 60_000).toISOString() };
+    const [action] = await db.insert(issueRecoveryActions).values({
+      companyId, sourceIssueId: task.id, status: "resolved", ownerType: "board", kind: "active_run_watchdog",
+      cause: "legacy_execution_requires_reconciliation", fingerprint: randomUUID(), nextAction: "Fixture settled",
+      evidence: { runId: run!.id, executionReconciliation: receipt }, updatedAt: new Date(),
+    }).returning();
+    await expect(releaseOrphanedRouterPin(db, input)).rejects.toThrow("verified termination");
+    await db.update(issueRecoveryActions).set({ evidence: {
+      runId: run!.id, executionReconciliation: { ...receipt, recordedAt: new Date().toISOString() },
+    } }).where(eq(issueRecoveryActions.id, action!.id));
+    expect(await releaseOrphanedRouterPin(db, { ...input, dryRun: true })).toMatchObject({ eligible: true, released: false });
+  });
+
+  it("rejects stale identity, missing reset proof and retained task context", async () => {
+    const { task, pin, input } = await orphanedPinFixture();
+    await expect(releaseOrphanedRouterPin(db, { ...input, companyId: otherCompanyId })).rejects.toThrow("Task not found");
+    await expect(releaseOrphanedRouterPin(db, { ...input, expectedMemberId: randomUUID() })).rejects.toThrow("allocation changed");
+    await expect(releaseOrphanedRouterPin(db, { ...input, expectedRevision: input.expectedRevision + 1 })).rejects.toThrow("pool changed");
+    await expect(releaseOrphanedRouterPin(db, { ...input, resetActivityId: randomUUID() })).rejects.toThrow("audited scoped session reset");
+    await db.insert(agentTaskSessions).values({ companyId, agentId, adapterType: "paperclip_runner", taskKey: task.identifier!, sessionDisplayId: "retained-context" });
+    await expect(releaseOrphanedRouterPin(db, input)).rejects.toThrow("Task context still exists");
+    expect(await db.select().from(aiConnectionTaskPins).where(eq(aiConnectionTaskPins.id, pin.id))).toHaveLength(1);
+  });
+
+  it("keeps orphaned-pin repair Board-only and defaults its route to preflight", async () => {
+    const { pool, pin, input } = await orphanedPinFixture();
+    const app = express(); app.use(express.json());
+    let actor = { type: "board", userId: "alice", source: "session", companyIds: [companyId], memberships: [{ companyId, status: "active", membershipRole: "owner" }] };
+    app.use((req, _res, next) => { req.actor = actor as typeof req.actor; next(); });
+    app.use("/api", aiConnectionRoutes(db)); app.use(errorHandler);
+    const body = {
+      agentId: input.agentId, taskKey: input.taskKey, expectedPinId: input.expectedPinId,
+      expectedMemberId: input.expectedMemberId, expectedRevision: input.expectedRevision, resetActivityId: input.resetActivityId,
+    };
+    const route = `/api/companies/${companyId}/ai-connection-pools/${pool.id}/task-pins/release`;
+    const inspection = `/api/companies/${companyId}/ai-connection-pools/${pool.id}/task-pins/${agentId}/${input.taskKey}`;
+    expect((await request(app).get(inspection)).body).toMatchObject({ expectedPinId: pin.id, expectedMemberId: pin.member.id });
+    expect((await request(app).post(route).send(body)).body).toMatchObject({ released: false, eligible: true });
+    actor = { ...actor, memberships: [{ companyId, status: "active", membershipRole: "viewer" }] };
+    expect((await request(app).get(inspection)).status).toBe(403);
+    expect((await request(app).post(route).send({ ...body, dryRun: false })).status).toBe(403);
+    actor = { type: "agent", agentId, companyId, source: "agent_jwt" } as unknown as typeof actor;
+    expect((await request(app).post(route).send({ ...body, dryRun: false })).status).toBe(403);
+    expect(await db.select().from(aiConnectionTaskPins).where(eq(aiConnectionTaskPins.id, pin.id))).toHaveLength(1);
   });
   it("rolls back both pin and cursor on a failure during commit", async () => {
     const pool = await makePool();
