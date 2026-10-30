@@ -37,7 +37,8 @@ function input(key, actorId = "board", targetCompanyId = companyId, selectedSubj
 
 function evidence(row) {
   const body = { schemaVersion: 1, requestId: row.id, prNumber: 971, subject: row.subject, principalId: row.actorId,
-    reviewerIds: [], observations: {}, projections: {}, manifest: {},
+    reviewerIds: [], observations: { physical: { observedAt: new Date(Date.now() + 20_000).toISOString(),
+      sourceRevision: "physical-clock-skew", sourceHash: "f".repeat(64), status: "UNKNOWN" } }, projections: {}, manifest: {},
     coverage: { auditPages: 0, auditPaginationComplete: false, auditCoverageVerified: false,
       sourcesComplete: false, manifestComplete: false, complete: false },
     attestation: { status: "UNKNOWN", reason: "production_attestation_unavailable" },

@@ -9,7 +9,7 @@ import {
 const keySchema = z.string().min(16).max(128).regex(/^[a-zA-Z0-9_-]+$/);
 const requestIdSchema = z.string().uuid();
 
-// Deliberately absent from app.ts. No production adapters or persistent store are registered.
+// Mounted only when the host explicitly supplies reviewed adapters and scope.
 export function reviewPreflightBridgeRoutes(deps: BridgeDependencies, recordActivity: (req: Request, entry: {
   action: "review_preflight.reserved" | "review_preflight.evidence_stored";
   requestId: string;

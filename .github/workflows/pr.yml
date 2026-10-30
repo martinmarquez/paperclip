@@ -17,7 +17,6 @@ jobs:
 
   review-preflight-store:
     name: Review preflight store PostgreSQL
-    needs: ci
     # This maintenance validation must never fall back to paid private or custom runners.
     if: github.repository == 'martinmarquez/paperclip' && github.event.repository.private == false
     runs-on: ubuntu-latest
@@ -36,7 +35,12 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: 24
-      - run: pnpm install --frozen-lockfile
+      # Match the release-pinned canonical install policy for its stale merge-tree lockfile.
+      - run: |
+          if ! pnpm install --frozen-lockfile; then
+            pnpm install --resolution-only --ignore-scripts --no-frozen-lockfile
+            pnpm install --frozen-lockfile
+          fi
       - name: Locate existing runner PostgreSQL tools
         run: |
           pg_bindir="$(pg_config --bindir)"

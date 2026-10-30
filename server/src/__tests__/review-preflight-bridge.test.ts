@@ -380,6 +380,20 @@ describe("disabled REN-4950 Board bridge contract", () => {
     expect(read.body.evidence).toBeNull();
   });
 
+  it("allows bounded clock skew without admitting evidence over fifteen minutes old", async () => {
+    const near = setup();
+    near.deps.now = () => new Date("2026-10-28T17:59:40.000Z");
+    const accepted = await post(near.app);
+    expect(near.store.rows.get(accepted.body.requestId)?.status).toBe("hold");
+    const far = setup();
+    far.deps.now = () => new Date("2026-10-28T17:59:29.000Z");
+    const pending = await post(far.app);
+    expect(far.store.rows.get(pending.body.requestId)?.evidence).toBeNull();
+    const old = setup({ stale: true });
+    const rejected = await post(old.app);
+    expect(old.store.rows.get(rejected.body.requestId)?.evidence).toBeNull();
+  });
+
   it("keeps audit cursors internal and redacts secret text in permitted fields", async () => {
     const { app } = setup({ permittedSecret: true });
     const accepted = await post(app);

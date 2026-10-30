@@ -10,12 +10,15 @@ cleanup() {
   local result=$?
   trap - EXIT
   if [[ -s "$root/data/postmaster.pid" ]]; then
-    pg_ctl -D "$root/data" -m immediate -w stop >/dev/null 2>&1 || return 1
+    pg_ctl -D "$root/data" -m immediate -w stop >/dev/null 2>&1 || {
+      printf 'teardown failed: temporary data retained until runner shutdown\n' >&2
+      exit 1
+    }
   fi
-  rm -rf "$root"
-  [[ ! -e "$root" ]] || return 1
+  rm -rf "$root" || exit 1
+  [[ ! -e "$root" ]] || exit 1
   printf 'teardown: PostgreSQL stopped and temporary data/socket paths absent\n'
-  return "$result"
+  exit "$result"
 }
 trap cleanup EXIT
 mkdir "$root/socket"

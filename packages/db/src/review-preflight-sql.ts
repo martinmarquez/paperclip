@@ -21,7 +21,10 @@ function executor(client: Pick<Db["$client"], "unsafe">, defaultSignal?: AbortSi
     async query<T extends Record<string, unknown>>(text: string, params: readonly unknown[] = [], signal?: AbortSignal) {
       if (signal?.aborted || defaultSignal?.aborted) throw new Error("preflight_sql_cancelled");
       const pending = client.unsafe<T[]>(text, parameters(params));
-      const cancel = () => { void pending.cancel().catch(() => {}); };
+      const cancel = () => {
+        try { pending.cancel(); }
+        catch { /* The transaction deadline also closes its dedicated connection. */ }
+      };
       signal?.addEventListener("abort", cancel, { once: true });
       defaultSignal?.addEventListener("abort", cancel, { once: true });
       try {

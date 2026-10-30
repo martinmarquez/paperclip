@@ -33,7 +33,7 @@ unavailable. Missing sources do not become a PASS.
 ## Required evidence
 
 The unchanged release-pinned canonical workflow retains all of its checks. The
-same PR workflow then runs `test-review-preflight-sql-store-pg.sh` on a standard
+same PR workflow also runs `test-review-preflight-sql-store-pg.sh` on a standard
 GitHub-hosted runner, only for the public maintenance fork. It never falls back
 to a private/custom paid runner. The physical harness creates its own Unix-socket
 cluster and invokes the real store and native client adapter from two Node

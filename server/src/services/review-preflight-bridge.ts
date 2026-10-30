@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 
-// REN-4950: this contract has no production store, Board reader, host reader, or route registration.
-// A later activation must supply and review all three adapters independently.
+// REN-4950: host activation must supply reviewed source and authority adapters.
+// The optional router and native store do not enable access by themselves.
 export type BridgeScope = {
   companyId: string;
   prNumber: number;
@@ -160,7 +160,8 @@ export const hashEvidence = (body: Omit<Evidence, "contentHash">) => sha256(cano
 
 const fresh = (observedAt: string, at: Date) => {
   const age = at.getTime() - Date.parse(observedAt);
-  return age >= 0 && age <= 15 * 60_000;
+  // Source/DB clocks can lead slightly; this never extends the 15-minute stale limit.
+  return age >= -30_000 && age <= 15 * 60_000;
 };
 
 export function evidenceFresh(evidence: Evidence, at: Date): boolean {
