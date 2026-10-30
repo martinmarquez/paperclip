@@ -108,6 +108,15 @@ const NATIVE_REVIEW_READ_TOOLS = new Set([
   "get_task_context", "get_task_history", "list_documents", "read_document", "list_document_revisions",
 ]);
 
+export type ReassignmentStopTarget = {
+  companyId: string;
+  issueId: string;
+  agentId: string;
+  runId: string | null;
+  checkoutRunId: string | null;
+  runIds: string[];
+};
+
 type Binding = {
   /** Server-derived scope for one addressed native completion review. */
   nativeReview?: NativeReviewAssignmentContext;
@@ -131,8 +140,7 @@ type Binding = {
   currentWakeComments?: CurrentWakeCommentsBinding;
   chatAttachmentReadScope?: NativeChatAttachmentReadScope;
   syncIssueExternalObjects?: (issueId: string) => Promise<void>;
-  stopTaskForReassignment?: (target: { companyId: string; issueId: string; agentId: string; runId: string | null;
-    checkoutRunId: string | null; runIds: string[] }) => Promise<void>;
+  stopTaskForReassignment?: (target: ReassignmentStopTarget) => Promise<void>;
   enqueueWakeup?: (agentId: string, options: {
     source: "assignment" | "automation";
     triggerDetail: "system";
