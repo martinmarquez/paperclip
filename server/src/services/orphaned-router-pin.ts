@@ -111,7 +111,7 @@ export async function releaseOrphanedRouterPin(db: Db, input: {
       ? !lease.releasedAt || lease.status === "pending_cleanup" || lease.cleanupStatus === "failed"
       : !hasRemoteTerminationReceipt(lease))) throw conflict("Task execution cleanup has not settled");
     const pending = bound.filter(run => ["queued", "running", "scheduled_retry"].includes(run.status));
-    if (pending.some(run => run.status !== "scheduled_retry" || run.runtimeMode !== "legacy"
+    if (pending.some(run => run.agentId !== input.agentId || run.status !== "scheduled_retry" || run.runtimeMode !== "legacy"
       || run.startedAt || run.runtimeModeResolvedAt || run.processPid || run.processGroupId || run.processStartedAt
       || run.nativeIssueId || run.nativeSessionId || run.sessionIdBefore || run.sessionIdAfter || run.executionStage
       || run.controllerBootId || run.controllerLeaseExpiresAt || run.runnerProfileJson || run.resultJson

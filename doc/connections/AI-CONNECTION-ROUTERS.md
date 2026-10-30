@@ -152,7 +152,7 @@ pool revision, a user-authored scoped reset after that allocation, absent task
 sessions (UUID and issue-identifier aliases), settled execution/recovery for all
 task assignees, and
 cleanup. Queued/running executions block release. A scheduled retry may remain
-only if it is a legacy placeholder with no claim, provider/session/binding or
+only if it belongs to the current task owner and is a legacy placeholder with no claim, provider/session/binding or
 retained launch evidence. Terminal status alone is not termination proof.
 Reconciliation receipts must have a server-recorded timestamp after the latest
 execution evidence; updating recovery bookkeeping does not refresh that proof.

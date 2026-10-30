@@ -226,7 +226,7 @@ describe("durable, authorized connection routing", () => {
     await db.update(heartbeatRuns).set({ status: "cancelled" }).where(eq(heartbeatRuns.id, run!.id));
   });
 
-  it.each(["queued", "running", "terminal_process"])("retains affinity for a previous assignee's %s execution", async (kind) => {
+  it.each(["queued", "running", "scheduled_retry", "terminal_process"])("retains affinity for a previous assignee's %s execution", async (kind) => {
     const { task, pin, input } = await orphanedPinFixture();
     await db.insert(heartbeatRuns).values({
       companyId, agentId: secondAgentId, status: kind === "terminal_process" ? "succeeded" : kind,
