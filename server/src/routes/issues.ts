@@ -13511,6 +13511,7 @@ export function issueRoutes(
       const stopForReassignment = async () => {
         if (!assigneeWillChange || !existing.assigneeAgentId) return;
         for (const attachmentId of new Set(commentAttachmentIds ?? [])) {
+          if (typeof attachmentId !== "string") throw unprocessable("Comment attachment IDs must be strings");
           const attachment = await svc.getAttachmentById(attachmentId);
           if (!attachment || attachment.companyId !== existing.companyId || attachment.issueId !== existing.id) {
             throw unprocessable("Comment attachments must belong to the same task and company");
