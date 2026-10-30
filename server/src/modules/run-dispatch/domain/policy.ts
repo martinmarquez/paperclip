@@ -51,6 +51,7 @@ export type ReviewParticipantFacts = {
 };
 
 export type ScheduledRetryGateErrorCode =
+  | "question_cancelled"
   | "agent_not_invokable"
   | "heartbeat_wake_on_demand_disabled"
   | "budget_blocked"
@@ -78,6 +79,7 @@ export type GateDecision =
     };
 
 export type ScheduledRetryFacts = {
+  questionCancellationRequested?: boolean;
   runId: string;
   runAgentId: string;
   issueId: string | null;
@@ -110,6 +112,7 @@ export type ScheduledRetryFacts = {
 };
 
 export type QueuedRunStalenessErrorCode =
+  | "question_cancelled"
   | "execution_reconciliation_required"
   | "issue_dependencies_blocked"
   | "issue_not_found"
@@ -131,6 +134,7 @@ export type StalenessDecision =
     };
 
 export type QueuedRunFacts = {
+  questionCancellationRequested?: boolean;
   /** Rechecked for automatic native replacements immediately before dispatch. */
   dependenciesBlocked?: DependencyBlockFacts | null;
   runId: string;
@@ -267,6 +271,10 @@ export function decideScheduledRetryGate(
   facts: ScheduledRetryFacts,
   _now: Date,
 ): GateDecision {
+  if (facts.questionCancellationRequested) return {
+    allowed: false, errorCode: "question_cancelled", issueId: facts.issueId,
+    reason: "The question was withdrawn or cancelled before retry dispatch.", details: {},
+  };
   if (facts.budgetBlock) {
     return {
       allowed: false,
@@ -503,6 +511,10 @@ export function decideQueuedRunStaleness(
   facts: QueuedRunFacts,
   _now: Date,
 ): StalenessDecision {
+  if (facts.questionCancellationRequested) return {
+    stale: true, errorCode: "question_cancelled",
+    reason: "The question was withdrawn or cancelled before queued dispatch.", details: {},
+  };
   if (!facts.issueFound) {
     return {
       stale: true,

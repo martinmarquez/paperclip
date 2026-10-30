@@ -48,6 +48,7 @@ import { questionResponseDeliveryService } from "../question-response-delivery.j
 import * as questionPatternValidation from "../question-pattern-validation.js";
 import { heartbeatService } from "../heartbeat.js";
 import { collectDispositionRepairSourceState } from "../recovery/disposition-repair.js";
+import { createRunDispatch } from "../../modules/run-dispatch/index.js";
 import { DurablePrpControlPlane } from "../../vendor/paperclip-runner/index.js";
 import { PaperclipControlPlanePort } from "./paperclip-control-plane-port.js";
 import { readPendingNativeRuntimeRequest } from "./runtime-request-resolution-authority.js";
@@ -676,7 +677,7 @@ describeEmbeddedPostgres("native question bridge", () => {
     expect((await collectDispositionRepairSourceState(db, { issue })).hasActiveExecutionPath).toBe(false);
   });
 
-  it("withdraws a question after the scheduler created a legacy retry placeholder", async () => {
+  it.each(["recovery_sweep", "due_promotion", "queued_admission"])("withdraws a scheduled question retry before %s", async (cancellationPath) => {
     await seed();
     const interaction = await projectNativeRuntimeRequest({ db, binding: binding(), event: runtimeRequestEvent() });
     await db.update(heartbeatRuns).set({
@@ -705,9 +706,18 @@ describeEmbeddedPostgres("native question bridge", () => {
         })).resolves.toBe(scheduled.run.id);
       } },
     );
-    await heartbeat.reapOrphanedRuns();
+    if (cancellationPath === "due_promotion") {
+      await createRunDispatch(db).promoteScheduledRetry({ runId: scheduled.run.id, companyId, now: new Date(Date.now() + 3_600_001) });
+    } else if (cancellationPath === "queued_admission") {
+      await db.update(heartbeatRuns).set({ status: "queued" }).where(eq(heartbeatRuns.id, scheduled.run.id));
+      await createRunDispatch(db).cancelStaleQueuedRun({ runId: scheduled.run.id, companyId, expectedStatus: "queued" });
+    } else {
+      await heartbeat.reapOrphanedRuns();
+    }
     const [retry] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, scheduled.run.id));
-    expect(retry).toMatchObject({ status: "cancelled", resultJson: { withdrawnInteractionId: interaction!.id } });
+    expect(retry?.status).toBe("cancelled");
+    if (cancellationPath === "recovery_sweep") expect(retry?.resultJson).toMatchObject({ withdrawnInteractionId: interaction!.id });
+    else expect(retry?.errorCode).toBe("question_cancelled");
     const [other] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, unrelated.id));
     expect(other.contextSnapshot?.nativeQuestionCancellation).toBeUndefined();
   });

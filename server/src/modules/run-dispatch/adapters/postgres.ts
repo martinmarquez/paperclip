@@ -289,6 +289,7 @@ export function createPostgresRunDispatchAdapter(
     // retries must not query pause holds or dependencies for a retry a
     // budget block or a stale assignment already suppresses.
     const facts: ScheduledRetryFacts = {
+      questionCancellationRequested: Boolean(input.contextSnapshot.nativeQuestionCancellation),
       runId: input.runId,
       runAgentId: input.agentId,
       issueId,
@@ -602,6 +603,7 @@ export function createPostgresRunDispatchAdapter(
         unresolvedBlockerIssueIds: readiness.unresolvedBlockerIssueIds,
         unresolvedBlockerCount: readiness.unresolvedBlockerCount,
       } : null,
+      questionCancellationRequested: Boolean(context.nativeQuestionCancellation),
       issueFound: issue !== null,
       issueStatus: issue?.status ?? null,
       issueAssigneeAgentId: issue?.assigneeAgentId ?? null,
