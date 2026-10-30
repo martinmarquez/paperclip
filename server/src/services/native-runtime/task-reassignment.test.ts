@@ -49,6 +49,18 @@ describe("runner task reassignment", () => {
     expect(await db.select().from(issueComments).where(eq(issueComments.issueId, f.targetId))).toHaveLength(1);
   });
 
+  it("does not apply Stop limits when the requested owner is already current", async () => {
+    const f = await fixture();
+    await db.insert(heartbeatRuns).values(Array.from({ length: 101 }, () => ({ id: randomUUID(),
+      companyId: f.companyId, agentId: f.agentId, nativeIssueId: f.targetId, status: "queued",
+      invocationSource: "automation", triggerDetail: "system" })));
+    await expect(f.authority.execute({ ...f.call, arguments: { ...f.call.arguments, assigneeActorId: f.agentId } }))
+      .resolves.toMatchObject({ disposition: "duplicate" });
+    expect(f.stopTaskForReassignment).not.toHaveBeenCalled();
+    expect(f.enqueueWakeup).not.toHaveBeenCalled();
+    expect(await f.target()).toMatchObject({ assigneeAgentId: f.agentId, statusVersion: 0 });
+  });
+
   it.each(["blocked", "backlog"])("preserves %s and does not wake work prematurely", async status => {
     const f = await fixture(status);
     await f.authority.execute(f.call);
@@ -145,6 +157,41 @@ describe("runner task reassignment", () => {
       payload: { issueId: f.targetId, mutation: "reassign_task_rollback", interruptedRunId: retryId },
       issueStateGuard: { statuses: ["todo", "in_progress"], assigneeAgentId: f.agentId, statusVersion: 1 },
     }));
+  });
+
+  it.each(["executionRunId", "checkoutRunId"] as const)("restores an unlinked retry despite a terminal %s reference", async pointer => {
+    const f = await fixture();
+    const retry = randomUUID(), terminal = randomUUID();
+    await db.insert(heartbeatRuns).values([
+      { id: retry, companyId: f.companyId, agentId: f.agentId, nativeIssueId: f.targetId,
+        status: "scheduled_retry", invocationSource: "automation", triggerDetail: "system" },
+      { id: terminal, companyId: f.companyId, agentId: f.agentId, nativeIssueId: f.targetId,
+        status: "succeeded", invocationSource: "automation", triggerDetail: "system" },
+    ]);
+    await db.update(issues).set({ [pointer]: terminal }).where(eq(issues.id, f.targetId));
+    f.stopTaskForReassignment.mockImplementationOnce(async target => {
+      expect(target.runIds).toEqual([retry]);
+      expect(target[pointer === "executionRunId" ? "runId" : pointer]).toBe(terminal);
+      await db.update(heartbeatRuns).set({ status: "cancelled", errorCode: "issue_reassigned" }).where(eq(heartbeatRuns.id, retry));
+      await db.update(issues).set({ statusVersion: 1 }).where(eq(issues.id, f.targetId));
+    });
+    await expect(f.authority.execute(f.call)).rejects.toThrow("reassignment_conflict");
+    expect(f.enqueueWakeup).toHaveBeenCalledExactlyOnceWith(f.agentId, expect.objectContaining({
+      payload: { issueId: f.targetId, mutation: "reassign_task_rollback", interruptedRunId: retry } }));
+  });
+
+  it("passes a frozen Stop set and leaves a retry arriving after preflight untouched", async () => {
+    const f = await fixture();
+    const arrival = randomUUID();
+    f.stopTaskForReassignment.mockImplementationOnce(async target => {
+      expect(target).toMatchObject({ runIds: [], runId: null, checkoutRunId: null });
+      await db.insert(heartbeatRuns).values({ id: arrival, companyId: f.companyId, agentId: f.agentId,
+        nativeIssueId: f.targetId, status: "queued", invocationSource: "automation", triggerDetail: "system" });
+    });
+    await expect(f.authority.execute(f.call)).rejects.toThrow("Stop the previous owner's task executions");
+    expect(await f.target()).toMatchObject({ assigneeAgentId: f.agentId, statusVersion: 0 });
+    expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, arrival)))[0]?.status).toBe("queued");
+    expect(f.enqueueWakeup).not.toHaveBeenCalled();
   });
 
   it.each(["owner", "closed", "new-run"])("does not compensate over a newer %s decision", async conflict => {

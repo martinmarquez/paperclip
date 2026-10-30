@@ -44,7 +44,7 @@ const mockIssueThreadInteractionService = vi.hoisted(() => ({
   expireStaleRequestConfirmationsForIssueDocument: vi.fn(async () => []),
 }));
 const mockRunnerGoalService = vi.hoisted(() => ({
-  projection: vi.fn(async () => null),
+  projection: vi.fn(async (): Promise<any> => null),
   act: vi.fn(),
 }));
 
@@ -257,6 +257,9 @@ describe("issue update comment wakeups", () => {
     vi.doUnmock("../middleware/index.js");
     registerModuleMocks();
     vi.clearAllMocks();
+    mockRunnerGoalService.projection.mockReset();
+    mockRunnerGoalService.projection.mockResolvedValue(null);
+    mockRunnerGoalService.act.mockReset();
     mockHeartbeatService.getRun.mockReset();
     mockHeartbeatService.getRun.mockResolvedValue(null);
     mockHeartbeatService.cancelRun.mockReset();
@@ -339,6 +342,52 @@ describe("issue update comment wakeups", () => {
     expect(response.status).toBe(200);
     expect(mockHeartbeatService.getActiveRunForAgent).toHaveBeenCalledWith(PREVIOUS_AGENT_ID,
       expect.objectContaining({ issueId: existing.id, executionRunId: null, checkoutRunId: "checkout-only-run", includePending: true }));
+  });
+
+  it.each([true, false])("recovers a timed-out goal stop only if its action was accepted (%s)", async accepted => {
+    const existing = makeIssue({ assigneeAgentId: PREVIOUS_AGENT_ID, assigneeUserId: null,
+      status: "in_progress", statusVersion: 7, executionRunId: null, checkoutRunId: null });
+    mockIssueService.getById.mockResolvedValue(existing);
+    mockRunnerGoalService.projection.mockResolvedValue({ goal: { status: "running" },
+      capability: { actions: ["pause"] }, pendingAction: null, revision: 1 });
+    const now = Date.now();
+    let restoreClock: (() => void) | undefined;
+    mockRunnerGoalService.act.mockImplementation(async () => {
+      if (!accepted) throw new Error("pause rejected");
+      let tick = 0;
+      const clock = vi.spyOn(Date, "now").mockImplementation(() => now + 40_000 * tick++);
+      restoreClock = () => { clock.mockRestore(); };
+    });
+    try {
+      const response = await request(await createApp()).patch(`/api/issues/${existing.id}`)
+        .send({ assigneeAgentId: ASSIGNEE_AGENT_ID, assigneeUserId: null });
+      expect(response.status).toBe(accepted ? 409 : 500);
+      expect(mockIssueService.update).not.toHaveBeenCalled();
+      if (accepted) expect(mockHeartbeatService.wakeup).toHaveBeenCalledExactlyOnceWith(PREVIOUS_AGENT_ID,
+        expect.objectContaining({ issueStateGuard: { statuses: ["in_progress"], assigneeAgentId: PREVIOUS_AGENT_ID,
+          statusVersion: 7 }, payload: { issueId: existing.id, mutation: "reassignment_rollback", stoppedRunIds: [] } }));
+      else expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
+    } finally { restoreClock?.(); }
+  });
+
+  it.each(["succeeded", "running"])("treats an outside %s checkout correctly during failed handoff recovery", async status => {
+    const existing = makeIssue({ assigneeAgentId: PREVIOUS_AGENT_ID, assigneeUserId: null, status: "in_progress",
+      statusVersion: 7, executionRunId: null, checkoutRunId: "earlier-checkout" });
+    const retry = { id: "retry", companyId: existing.companyId, agentId: PREVIOUS_AGENT_ID,
+      nativeIssueId: existing.id, status: "scheduled_retry" };
+    mockIssueService.getById.mockResolvedValue(existing);
+    mockHeartbeatService.getRun.mockResolvedValue({ id: "earlier-checkout", companyId: existing.companyId,
+      agentId: PREVIOUS_AGENT_ID, status });
+    let stopped = false;
+    mockHeartbeatService.getActiveRunForAgent.mockImplementation(async (_agentId, scope) =>
+      scope?.includePending && !stopped ? retry : null);
+    mockHeartbeatService.cancelRun.mockImplementation(async () => { stopped = true; return { ...retry, status: "cancelled" }; });
+    mockIssueService.update.mockRejectedValue(new Error("transaction rejected"));
+    const response = await request(await createApp()).patch(`/api/issues/${existing.id}`)
+      .send({ assigneeAgentId: ASSIGNEE_AGENT_ID, assigneeUserId: null });
+    expect(response.status).toBe(500);
+    if (status === "succeeded") expect(mockHeartbeatService.wakeup).toHaveBeenCalledTimes(1);
+    else expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
   });
 
   it("rejects a foreign comment attachment before stopping the previous owner", async () => {

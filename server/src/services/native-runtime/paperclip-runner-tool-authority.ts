@@ -131,7 +131,8 @@ type Binding = {
   currentWakeComments?: CurrentWakeCommentsBinding;
   chatAttachmentReadScope?: NativeChatAttachmentReadScope;
   syncIssueExternalObjects?: (issueId: string) => Promise<void>;
-  stopTaskForReassignment?: (target: { companyId: string; issueId: string; agentId: string; runId: string | null }) => Promise<void>;
+  stopTaskForReassignment?: (target: { companyId: string; issueId: string; agentId: string; runId: string | null;
+    checkoutRunId: string | null; runIds: string[] }) => Promise<void>;
   enqueueWakeup?: (agentId: string, options: {
     source: "assignment" | "automation";
     triggerDetail: "system";
@@ -1200,7 +1201,7 @@ export class PaperclipRunnerToolAuthority {
       const target = await authorize(tx as unknown as Db, context.run);
       if (await priorReceipt(tx as unknown as Db)) return null;
       validate(target);
-      const pending = target.assigneeAgentId ? await tx.select({ id: heartbeatRuns.id }).from(heartbeatRuns)
+      const pending = target.assigneeAgentId && target.assigneeAgentId !== assigneeAgentId ? await tx.select({ id: heartbeatRuns.id }).from(heartbeatRuns)
         .where(and(eq(heartbeatRuns.agentId, target.assigneeAgentId),
           taskRunBinding({ companyId: this.binding.companyId, issueId: taskId,
             executionRunId: target.executionRunId, checkoutRunId: target.checkoutRunId }),
@@ -1230,7 +1231,15 @@ export class PaperclipRunnerToolAuthority {
       if (!current || current.assigneeAgentId !== prepared.assigneeAgentId || current.assigneeUserId ||
           current.conversationAgentId || !["todo", "in_progress"].includes(current.status) ||
           record(current.executionState).status === "pending") return;
-      if ([current.executionRunId, current.checkoutRunId].some(id => id && !stoppedIds.has(id))) return;
+      const otherClaims = [...new Set([current.executionRunId, current.checkoutRunId])]
+        .filter((id): id is string => Boolean(id) && !stoppedIds.has(id!));
+      if (otherClaims.length) {
+        const liveClaims = await this.db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
+          eq(heartbeatRuns.companyId, this.binding.companyId), inArray(heartbeatRuns.id, otherClaims),
+          inArray(heartbeatRuns.status, ["running", "queued", "scheduled_retry"]),
+        )).limit(1);
+        if (liveClaims.length) return;
+      }
       try {
         await this.binding.enqueueWakeup(current.assigneeAgentId, {
           source: "assignment", triggerDetail: "system", reason: "issue_assigned",
@@ -1250,7 +1259,8 @@ export class PaperclipRunnerToolAuthority {
       }
       try {
         await this.binding.stopTaskForReassignment?.({ companyId: this.binding.companyId, issueId: taskId,
-          agentId: prepared.assigneeAgentId, runId: prepared.executionRunId });
+          agentId: prepared.assigneeAgentId, runId: prepared.executionRunId,
+          checkoutRunId: prepared.checkoutRunId, runIds: prepared.reassignmentRunIds });
       } catch (error) {
         await restoreInterruptedWork(error);
         throw error;

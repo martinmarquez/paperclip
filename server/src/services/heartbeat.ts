@@ -25090,7 +25090,6 @@ export function heartbeatService(
                       runtimeEnv.PAPERCLIP_RUNNER_REMOTE_PROVIDER_PACK_PATH?.trim() ||
                       null,
                     stopTaskForReassignment: async (target) => {
-                      await settleLiveRunnerGoalBeforeInterrupt(db, target);
                       if (target.runId) {
                         const prior = await getRun(target.runId);
                         if (!prior || prior.companyId !== target.companyId || prior.agentId !== target.agentId) {
@@ -25101,11 +25100,18 @@ export function heartbeatService(
                         executionRunId: issues.executionRunId, assigneeAgentId: issues.assigneeAgentId })
                         .from(issues).where(and(eq(issues.companyId, target.companyId), eq(issues.id, target.issueId)));
                       if (!task || task.assigneeAgentId !== target.agentId) throw conflict("Reassignment owner changed");
-                      const pending = await db.select().from(heartbeatRuns).where(and(
+                      if (task.executionRunId !== target.runId || task.checkoutRunId !== target.checkoutRunId) {
+                        throw conflict("Reassignment run binding changed");
+                      }
+                      await settleLiveRunnerGoalBeforeInterrupt(db, target);
+                      // Only the locked preflight set may be cancelled. A run that
+                      // arrives later is fenced by the ownership transaction.
+                      const pending = target.runIds.length ? await db.select().from(heartbeatRuns).where(and(
                         eq(heartbeatRuns.agentId, target.agentId),
-                        taskRunBinding({ ...target, executionRunId: task.executionRunId, checkoutRunId: task.checkoutRunId }),
+                        taskRunBinding({ ...target, executionRunId: target.runId }),
+                        inArray(heartbeatRuns.id, target.runIds),
                         inArray(heartbeatRuns.status, ["running", "queued", "scheduled_retry"]),
-                      )).orderBy(asc(heartbeatRuns.id)).limit(101);
+                      )).orderBy(asc(heartbeatRuns.id)).limit(101) : [];
                       if (pending.length > 100) throw conflict("Too many pending task runs; inspect before reassignment");
                       for (const prior of pending) {
                         const stopped = await cancelRunInternal(prior.id, "Cancelled for task reassignment", {

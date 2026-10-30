@@ -1681,8 +1681,13 @@ Before Stop, the HTTP handoff checks that comment attachments belong to the same
 task and company. The comment transaction still checks and locks the actual
 binding. If Stop succeeds but the ownership update fails, the HTTP path requests
 a guarded wake only for the unchanged runnable prior owner and state version.
-A newer owner, version, status, checkout or execution claim prevents that wake.
-The native path captures pending run IDs during its locked preflight so rollback
-can also recognize a stopped retry that had no execution pointer. Its existing
+A newer owner, version, status or live checkout/execution claim prevents that wake.
+An accepted goal pause/clear is recorded before confirmation polling, so failed
+confirmation can also request guarded recovery; rejected actions cannot.
+The native path captures pending run IDs and both bindings during its locked
+preflight. Stop rejects changed bindings and cancels only that captured set;
+new arrivals remain untouched and prevent the transfer through the transaction
+fence. Rollback can recognize a stopped retry with no execution pointer or with
+terminal checkout/execution references. Its existing
 state-guarded compensation continues to respect newer ownership and manual holds.
 Neither path overrides a budget, pause, review or execution-reconciliation gate.

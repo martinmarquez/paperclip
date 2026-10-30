@@ -3610,6 +3610,7 @@ export function issueRoutes(
     companyId: string;
     issueId: string;
     agentId: string;
+    onAccepted?: () => void;
   }) => {
     const current = await runnerGoals.projection(
       input.companyId,
@@ -3640,6 +3641,7 @@ export function issueRoutes(
       expectedRevision: current.revision,
       action,
     });
+    input.onAccepted?.();
     const deadline = Date.now() + 30_000;
     while (Date.now() < deadline) {
       const observed = await runnerGoals.projection(
@@ -13507,7 +13509,7 @@ export function issueRoutes(
       // own run (for example handing work to a signoff reviewer).
       const issueMutationStopId = randomUUID();
       const confirmedReassignmentStops: string[] = [];
-      let reassignmentGoalStopped = false;
+      let reassignmentGoalStopAccepted = false;
       const stopForReassignment = async () => {
         if (!assigneeWillChange || !existing.assigneeAgentId) return;
         for (const attachmentId of new Set(commentAttachmentIds ?? [])) {
@@ -13517,12 +13519,12 @@ export function issueRoutes(
             throw unprocessable("Comment attachments must belong to the same task and company");
           }
         }
-        const goalStop = await stopRunnerGoalForOwnershipChange({
+        await stopRunnerGoalForOwnershipChange({
           companyId: existing.companyId,
           issueId: existing.id,
           agentId: existing.assigneeAgentId,
+          onAccepted: () => { reassignmentGoalStopAccepted = true; },
         });
-        reassignmentGoalStopped = Boolean(goalStop);
         const stoppedRunIds = new Set<string>();
         while (true) {
           const runToStopForReassignment = await heartbeat.getActiveRunForAgent(existing.assigneeAgentId, {
@@ -13565,13 +13567,18 @@ export function issueRoutes(
         }
       };
       const restoreFailedReassignment = async () => {
-        if ((!confirmedReassignmentStops.length && !reassignmentGoalStopped) || !existing.assigneeAgentId ||
+        if ((!confirmedReassignmentStops.length && !reassignmentGoalStopAccepted) || !existing.assigneeAgentId ||
             !["todo", "in_progress"].includes(existing.status)) return;
         const current = await svc.getById(existing.id);
         if (!current || current.assigneeAgentId !== existing.assigneeAgentId ||
             current.assigneeUserId !== existing.assigneeUserId || current.status !== existing.status ||
-            current.statusVersion !== existing.statusVersion ||
-            [current.executionRunId, current.checkoutRunId].some(runId => runId && !confirmedReassignmentStops.includes(runId))) return;
+            current.statusVersion !== existing.statusVersion) return;
+        for (const runId of new Set([current.executionRunId, current.checkoutRunId])) {
+          if (!runId || confirmedReassignmentStops.includes(runId)) continue;
+          const run = await heartbeat.getRun(runId);
+          if (!run || run.companyId !== existing.companyId ||
+              ["running", "queued", "scheduled_retry"].includes(run.status)) return;
+        }
         await heartbeat.wakeup(existing.assigneeAgentId, {
           source: "automation", triggerDetail: "system", reason: "issue_assigned",
           requestedByActorType: actor.actorType, requestedByActorId: actor.actorId,
