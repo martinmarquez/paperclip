@@ -53,6 +53,13 @@ try {
     const result = await store.reserve(input(process.argv[3]));
     process.stdout.write(JSON.stringify({ workerPid: process.pid, kind: result.kind, id: "reservation" in result ? result.reservation.id : null }) + "\n");
   } else if (mode === "verify") {
+    const sampleAt = new Date("2026-10-30T12:00:00.000Z");
+    const bound = await db.query("SELECT $1::timestamptz AS at, $2::jsonb AS payload, $3::integer AS n, $4::boolean AS ok",
+      [sampleAt, { sample: "json" }, 3, true]);
+    assert.equal(new Date(bound.rows[0].at).toISOString(), sampleAt.toISOString());
+    assert.deepEqual(bound.rows[0].payload, { sample: "json" });
+    assert.equal(bound.rows[0].n, 3);
+    assert.equal(bound.rows[0].ok, true);
     const row = await sql`SELECT id FROM review_preflight_reservations WHERE company_id = ${companyId} LIMIT 1`;
     assert.equal(row.length, 1, "one reservation survives both processes and restart");
     const id = row[0].id;

@@ -10,7 +10,9 @@ export interface PreflightSqlDatabase extends PreflightSqlExecutor {
 
 function parameters(values: readonly unknown[]) {
   return values.map((value) => {
-    if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean" || value instanceof Date) return value;
+    // Drizzle makes the shared postgres.js timestamp/JSON serializers transparent.
+    if (value instanceof Date) return value.toISOString();
+    if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") return value;
     if (typeof value === "object") return JSON.stringify(value);
     throw new Error("preflight_sql_parameter_invalid");
   });
