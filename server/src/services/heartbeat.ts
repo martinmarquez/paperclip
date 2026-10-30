@@ -15518,7 +15518,7 @@ export function heartbeatService(
         : null;
     const transientRetryNotBefore = transientRecovery?.retryNotBefore ?? null;
     const contextSnapshot = parseObject(run.contextSnapshot);
-    const issueId = readNonEmptyString(contextSnapshot.issueId);
+    const issueId = run.nativeIssueId ?? readNonEmptyString(contextSnapshot.issueId);
 
     if (!baseSchedule) {
       const exhaustion = {
@@ -15670,6 +15670,7 @@ export function heartbeatService(
     const retryContextSnapshot: Record<string, unknown> = withRecoveryContext(
       {
         ...contextSnapshot,
+        ...(issueId ? { issueId } : {}),
         executionRetryAccounting: accountingForScheduledRetry(run, retryReason, schedule.attempt),
         retryOfRunId: run.id,
         wakeReason,
@@ -15746,6 +15747,7 @@ export function heartbeatService(
             | "issue_terminal_status"
             | "issue_not_in_progress"
             | "continuation_user_authorization_missing"
+            | "question_cancelled"
             | "issue_execution_lock_changed";
           issueId: string | null;
           details: Record<string, unknown>;
@@ -16022,6 +16024,15 @@ export function heartbeatService(
             };
           }
         }
+
+        const [lockedPredecessor] = await tx.select({ contextSnapshot: heartbeatRuns.contextSnapshot })
+          .from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, run.companyId), eq(heartbeatRuns.id, run.id)))
+          .for("update");
+        if (lockedPredecessor?.contextSnapshot?.[NATIVE_QUESTION_CANCELLATION_CONTEXT_KEY]) return {
+          outcome: "not_scheduled", issueId, errorCode: "question_cancelled",
+          reason: "The question was withdrawn or cancelled before retry dispatch.",
+          details: { sourceRunId: run.id },
+        };
 
         const scheduledRunId = randomUUID();
         if (contextSnapshot.explicitUserContinuation) {

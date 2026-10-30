@@ -253,6 +253,29 @@ describe("openapi routes", () => {
     expect(Object.keys(remove.responses)).toEqual(expect.arrayContaining(["200", "400", "401", "403", "404", "409"]));
   });
 
+  it("documents scoped pin repair as Board-only with preflight as the default", () => {
+    const { spec } = loadSpecRoutes();
+    const inspect = spec.paths["/api/companies/{companyId}/ai-connection-pools/{poolId}/task-pins/{agentId}/{taskKey}"].get;
+    const release = spec.paths["/api/companies/{companyId}/ai-connection-pools/{poolId}/task-pins/release"].post;
+    for (const operation of [inspect, release]) {
+      expect(operation.security).toEqual([{ BoardSessionAuth: [] }, { BoardApiKeyAuth: [] }]);
+      expect(operation["x-paperclip-authorization"]).toEqual({ actor: "board" });
+      expect(operation.description).toContain("manage-connections permission");
+      expect(operation.parameters.every((parameter: any) => parameter.schema.format === "uuid")).toBe(true);
+    }
+    expect(inspect.responses["200"].headers["Cache-Control"].schema.enum).toEqual(["no-store"]);
+    const body = release.requestBody.content["application/json"].schema;
+    expect(body.required).toEqual(expect.arrayContaining(["agentId", "taskKey", "expectedPinId", "expectedMemberId", "expectedRevision", "resetActivityId"]));
+    expect(body.required).not.toContain("dryRun");
+    expect(body.properties.dryRun).toMatchObject({ type: "boolean", default: true });
+    expect(body.additionalProperties).toBe(false);
+    expect(body.properties.localOriginVerifications).toMatchObject({ maxItems: 100, items: {
+      required: ["runId", "leaseId", "sourceHost", "evidence"], additionalProperties: false,
+      properties: { evidence: { minLength: 80, maxLength: 4000 } },
+    } });
+    expect(Object.keys(release.responses)).toEqual(expect.arrayContaining(["200", "400", "401", "403", "404", "409"]));
+  });
+
   it("documents personal board-only announcements and private responses", () => {
     const { spec } = loadSpecRoutes();
     const current = spec.paths["/api/announcements/current"].get;
