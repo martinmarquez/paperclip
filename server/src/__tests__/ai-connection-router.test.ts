@@ -226,6 +226,17 @@ describe("durable, authorized connection routing", () => {
     await db.update(heartbeatRuns).set({ status: "cancelled" }).where(eq(heartbeatRuns.id, run!.id));
   });
 
+  it.each(["queued", "running", "terminal_process"])("retains affinity for a previous assignee's %s execution", async (kind) => {
+    const { task, pin, input } = await orphanedPinFixture();
+    await db.insert(heartbeatRuns).values({
+      companyId, agentId: secondAgentId, status: kind === "terminal_process" ? "succeeded" : kind,
+      contextSnapshot: { taskKey: task.id },
+      ...(kind === "terminal_process" ? { processPid: process.pid } : {}),
+    });
+    await expect(releaseOrphanedRouterPin(db, input)).rejects.toThrow(/unclaimed retry|process ownership/);
+    expect(await db.select().from(aiConnectionTaskPins).where(eq(aiConnectionTaskPins.id, pin.id))).toHaveLength(1);
+  });
+
   it.each(["taskKey", "taskId", "identifier", "wake_payload"])("finds active execution through %s binding", async (kind) => {
     const { task, pin, input } = await orphanedPinFixture();
     const [wake] = kind === "wake_payload" ? await db.insert(agentWakeupRequests).values({

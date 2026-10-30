@@ -93,7 +93,9 @@ export async function releaseOrphanedRouterPin(db: Db, input: {
     )).limit(1);
     if (coordinator) throw conflict("Native execution or recovery has not settled");
     const bound = await tx.select().from(heartbeatRuns).where(and(
-      eq(heartbeatRuns.companyId, input.companyId), eq(heartbeatRuns.agentId, input.agentId),
+      // A previous assignee can still own execution for this task. Repair must
+      // settle that execution too, rather than inspect only today's assignee.
+      eq(heartbeatRuns.companyId, input.companyId),
       or(inArray(sql`${heartbeatRuns.nativeIssueId}::text`, aliases),
         ...["issueId", "taskKey", "taskId", "aiRouterTaskKey"].map(key => inArray(sql`${heartbeatRuns.contextSnapshot}->>${key}`, aliases)),
         sql`exists (select 1 from ${agentWakeupRequests} wake where wake.company_id = ${input.companyId}::uuid

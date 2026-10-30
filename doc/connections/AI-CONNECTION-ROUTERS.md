@@ -149,7 +149,8 @@ and send the same request with `dryRun: false` only for the approved repair.
 
 The server checks the same-company task and current owner, exact allocation and
 pool revision, a user-authored scoped reset after that allocation, absent task
-sessions (UUID and issue-identifier aliases), settled execution/recovery and
+sessions (UUID and issue-identifier aliases), settled execution/recovery for all
+task assignees, and
 cleanup. Queued/running executions block release. A scheduled retry may remain
 only if it is a legacy placeholder with no claim, provider/session/binding or
 retained launch evidence. Terminal status alone is not termination proof.
