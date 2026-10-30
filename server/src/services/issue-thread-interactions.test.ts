@@ -11,7 +11,7 @@ vi.mock("./issues.js", () => ({
 
 type SelectRow = Record<string, unknown>;
 
-function createSelectChain(rows: SelectRow[], onLock: (mode: string) => void) {
+function createSelectChain(rows: SelectRow[], onLock: (mode: string) => void = () => {}) {
   return {
     from() {
       const query = {
