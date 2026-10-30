@@ -47,6 +47,7 @@ import {
 import { questionResponseDeliveryService } from "../question-response-delivery.js";
 import * as questionPatternValidation from "../question-pattern-validation.js";
 import { heartbeatService } from "../heartbeat.js";
+import { collectDispositionRepairSourceState } from "../recovery/disposition-repair.js";
 import { DurablePrpControlPlane } from "../../vendor/paperclip-runner/index.js";
 import { PaperclipControlPlanePort } from "./paperclip-control-plane-port.js";
 import { readPendingNativeRuntimeRequest } from "./runtime-request-resolution-authority.js";
@@ -606,13 +607,15 @@ describeEmbeddedPostgres("native question bridge", () => {
     });
   });
 
-  it("recovers an explicit question withdrawal committed with its cancellation intent", async () => {
+  it.each(["queued", "running", "scheduled_retry"])("recovers explicit question withdrawal for a %s run", async (status) => {
     await seed();
     const interaction = await projectNativeRuntimeRequest({
       db,
       binding: binding(),
       event: runtimeRequestEvent(),
     });
+    await db.update(heartbeatRuns).set({ status }).where(eq(heartbeatRuns.id, runId));
+    await expect(nativeQuestionRunToCancel(db, interaction!)).resolves.toBe(runId);
     await issueThreadInteractionService(db).withdrawInteraction(
       { id: issueId, companyId },
       interaction!.id,
@@ -653,6 +656,85 @@ describeEmbeddedPostgres("native question bridge", () => {
         cancelledIssueId: issueId,
       },
     });
+  });
+
+  it.each(["queued", "running", "scheduled_retry"])("recognizes a %s native execution without a legacy issue snapshot", async (status) => {
+    await seed();
+    const [issue] = await db.select().from(issues).where(eq(issues.id, issueId));
+    await db.update(heartbeatRuns).set({ status, contextSnapshot: {} }).where(eq(heartbeatRuns.id, runId));
+    expect((await collectDispositionRepairSourceState(db, { issue })).hasActiveExecutionPath).toBe(true);
+    expect((await collectDispositionRepairSourceState(db, { issue, excludeRunId: runId })).hasActiveExecutionPath).toBe(false);
+
+    const [otherIssue] = await db.insert(issues).values({
+      companyId, title: "Unrelated task", status: "in_progress", assigneeAgentId: agentId,
+    }).returning();
+    await db.update(heartbeatRuns).set({ contextSnapshot: { issueId: otherIssue.id } }).where(eq(heartbeatRuns.id, runId));
+    expect((await collectDispositionRepairSourceState(db, { issue })).hasActiveExecutionPath).toBe(true);
+    expect((await collectDispositionRepairSourceState(db, { issue: otherIssue })).hasActiveExecutionPath).toBe(false);
+
+    await db.update(heartbeatRuns).set({ status: "cancelled" }).where(eq(heartbeatRuns.id, runId));
+    expect((await collectDispositionRepairSourceState(db, { issue })).hasActiveExecutionPath).toBe(false);
+  });
+
+  it("withdraws a question after the scheduler created a legacy retry placeholder", async () => {
+    await seed();
+    const interaction = await projectNativeRuntimeRequest({ db, binding: binding(), event: runtimeRequestEvent() });
+    await db.update(heartbeatRuns).set({
+      status: "failed", errorCode: "adapter_failed", finishedAt: new Date(),
+      resultJson: { errorFamily: "transient_upstream" },
+    }).where(eq(heartbeatRuns.id, runId));
+    const scheduled = await heartbeat.scheduleBoundedRetry(runId, { delayMs: 3_600_000 });
+    expect(scheduled.outcome).toBe("scheduled");
+    if (scheduled.outcome !== "scheduled") return;
+    expect(scheduled.run).toMatchObject({ status: "scheduled_retry", runtimeMode: "legacy", nativeIssueId: null });
+    await expect(nativeQuestionRunToCancel(db, interaction!)).resolves.toBe(scheduled.run.id);
+    const [otherIssue] = await db.insert(issues).values({ companyId, title: "Other task", status: "in_progress" }).returning();
+    const [unrelated] = await db.insert(heartbeatRuns).values({
+      companyId, agentId, status: "scheduled_retry", retryOfRunId: runId, contextSnapshot: { issueId: otherIssue.id },
+      scheduledRetryAt: new Date(Date.now() + 3_600_000),
+    }).returning();
+    await issueThreadInteractionService(db).withdrawInteraction(
+      { id: issueId, companyId }, interaction!.id, { reason: "No longer needed" }, { userId: "operator-1" },
+      { afterResolveInTransaction: async (tx, withdrawn) => {
+        await expect(requestNativeQuestionRunCancellation(tx, withdrawn, {
+          kind: "interaction_withdrawn", interactionId: withdrawn.id,
+        })).resolves.toBe(scheduled.run.id);
+      } },
+    );
+    await heartbeat.reapOrphanedRuns();
+    const [retry] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, scheduled.run.id));
+    expect(retry).toMatchObject({ status: "cancelled", resultJson: { withdrawnInteractionId: interaction!.id } });
+    const [other] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, unrelated.id));
+    expect(other.contextSnapshot?.nativeQuestionCancellation).toBeUndefined();
+  });
+
+  it("fences a retry scheduled after question cancellation commits", async () => {
+    await seed();
+    const interaction = await projectNativeRuntimeRequest({ db, binding: binding(), event: runtimeRequestEvent() });
+    await db.update(heartbeatRuns).set({
+      status: "failed", errorCode: "adapter_failed", finishedAt: new Date(),
+      resultJson: { errorFamily: "transient_upstream" },
+    }).where(eq(heartbeatRuns.id, runId));
+    await db.transaction(async (tx) => {
+      await requestNativeQuestionRunCancellation(tx, interaction!, { kind: "interaction_cancelled", interactionId: interaction!.id });
+    });
+    await expect(heartbeat.scheduleBoundedRetry(runId, { delayMs: 3_600_000 })).resolves.toMatchObject({
+      outcome: "not_scheduled", errorCode: "question_cancelled",
+    });
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.retryOfRunId, runId))).toHaveLength(0);
+  });
+
+  it("keeps legacy execution association scoped to the same company", async () => {
+    await seed();
+    const [issue] = await db.select().from(issues).where(eq(issues.id, issueId));
+    await db.update(heartbeatRuns).set({ status: "cancelled" }).where(eq(heartbeatRuns.id, runId));
+    const [legacyRun] = await db.insert(heartbeatRuns).values({
+      companyId, agentId, status: "running", runtimeMode: "legacy", contextSnapshot: { issueId },
+    }).returning();
+    expect((await collectDispositionRepairSourceState(db, { issue })).hasActiveExecutionPath).toBe(true);
+    const [otherCompany] = await db.insert(companies).values({ name: "Other company" }).returning();
+    await db.update(heartbeatRuns).set({ companyId: otherCompany.id }).where(eq(heartbeatRuns.id, legacyRun.id));
+    expect((await collectDispositionRepairSourceState(db, { issue })).hasActiveExecutionPath).toBe(false);
   });
 
   it("removes the UI-only marker from a canonical custom response", async () => {

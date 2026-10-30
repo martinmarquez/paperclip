@@ -1625,6 +1625,18 @@ intact.
 
 ### Explicit continuation wakes
 
+Disposition repair recognizes queued, running and scheduled native retries by
+their persisted native task binding, even when the legacy context snapshot is
+missing or names a different task. The native binding takes precedence; legacy
+runs retain their same-company context association. An active run does not grant
+another owner permission to dispatch duplicate recovery work.
+
+Withdrawing or cancelling a native question records cancellation intent for a
+scheduled retry as well as a queued or running turn. The existing post-commit
+path and recovery sweep consume that intent. Company, task, native runtime and
+question identity checks remain required; historical legacy questions do not
+acquire native execution authority.
+
 An agent that reports a blocker owned by itself is already aware of that blocker; recording it does not send an immediate `issue_unblock_requested` wake back to the reporting agent. Board requests and blockers delegated to another agent still notify their owner. Waiting on another issue requires a first-class blocker relation; prose in an unblock descriptor does not create that dependency.
 
 Reporter identity comes from the authenticated agent actor, not an audit run header. A Board request remains a Board request even if it includes `X-Paperclip-Run-Id`; that caller-supplied trace does not authenticate an agent. Local CLI agents that need agent semantics must use their agent credentials.

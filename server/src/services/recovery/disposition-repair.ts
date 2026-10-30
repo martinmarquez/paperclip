@@ -169,7 +169,13 @@ export async function collectDispositionRepairSourceState(
           and(
             eq(heartbeatRuns.companyId, issue.companyId),
             inArray(heartbeatRuns.status, [...ACTIVE_RUN_STATUSES]),
-            sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issue.id}`,
+            // Native binding is authoritative even when the legacy snapshot is
+            // absent or stale. Match terminalization's native-first association.
+            sql`coalesce(
+              ${heartbeatRuns.nativeIssueId}::text,
+              case when jsonb_typeof(${heartbeatRuns.contextSnapshot} -> 'issueId') = 'string'
+                then ${heartbeatRuns.contextSnapshot} ->> 'issueId' end
+            ) = ${issue.id}`,
             input.excludeRunId ? ne(heartbeatRuns.id, input.excludeRunId) : sql`true`,
           ),
         ),
