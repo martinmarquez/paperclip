@@ -14,3 +14,34 @@ jobs:
     # immutable upstream workflow. Moving master requires scripts from newer releases.
     # The upstream identity guard routes this fork to standard GitHub-hosted runners.
     uses: paperclipai/paperclip/.github/workflows/pr-trusted.yml@bba6a45f0d364cfd962ac59b3bdf2426a8222adb
+
+  review-preflight-store:
+    name: Review preflight store PostgreSQL
+    needs: ci
+    # This maintenance validation must never fall back to paid private or custom runners.
+    if: github.repository == 'martinmarquez/paperclip' && github.event.repository.private == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 9.15.4
+          run_install: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - run: pnpm install --frozen-lockfile
+      - name: Locate existing runner PostgreSQL tools
+        run: |
+          pg_bindir="$(pg_config --bindir)"
+          test -x "$pg_bindir/initdb"
+          test -x "$pg_bindir/pg_ctl"
+          echo "$pg_bindir" >> "$GITHUB_PATH"
+      - name: Verify store API, processes, restart and JSON evidence
+        run: bash scripts/test-review-preflight-sql-store-pg.sh

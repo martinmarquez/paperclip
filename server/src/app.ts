@@ -107,6 +107,10 @@ import { serverVersion } from "./version.js";
 import { resourceMembershipRoutes } from "./routes/resource-memberships.js";
 import { inboxDismissalRoutes } from "./routes/inbox-dismissals.js";
 import { instanceSettingsRoutes } from "./routes/instance-settings.js";
+import { reviewPreflightBridgeRoutes } from "./routes/review-preflight-bridge.js";
+import type { BridgeDependencies } from "./services/review-preflight-bridge.js";
+import { getActorInfo } from "./routes/authz.js";
+import { logActivity } from "./services/activity-log.js";
 import { instanceSettingsService } from "./services/instance-settings.js";
 import { openApiRoutes } from "./routes/openapi.js";
 import {
@@ -481,6 +485,8 @@ export async function createApp(
     };
     databaseBackupService?: InstanceDatabaseBackupService;
     databaseBackupHealth?: InspectDatabaseBackupHealthOptions;
+    /** Explicit host integration only; absent by default, never enables grants or schema. */
+    reviewPreflightBridge?: BridgeDependencies;
     deploymentMode: DeploymentMode;
     deploymentExposure: DeploymentExposure;
     allowedHostnames: string[];
@@ -812,6 +818,22 @@ export async function createApp(
     null;
   api.use(costRoutes(db, { pluginWorkerManager: workerManager }));
   api.use(activityRoutes(db));
+  if (opts.reviewPreflightBridge) {
+    const bridge = opts.reviewPreflightBridge;
+    api.use(reviewPreflightBridgeRoutes(bridge, async (req, entry) => {
+      const actor = getActorInfo(req);
+      await logActivity(db, {
+        companyId: bridge.scope.companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        runId: actor.runId,
+        action: entry.action,
+        entityType: "review_preflight",
+        entityId: entry.requestId,
+      });
+    }));
+  }
   api.use(dashboardRoutes(db));
   api.use(attentionRoutes(db));
   api.use(decisionTrainingRoutes(db));
