@@ -127,7 +127,7 @@ import {
 import { PaperclipControlPlanePort } from "./paperclip-control-plane-port.js";
 import { appendHeartbeatRunEvent } from "../heartbeat-run-events.js";
 import { nativeSha256 } from "./canonical.js";
-import { PaperclipRunnerToolAuthority } from "./paperclip-runner-tool-authority.js";
+import { PaperclipRunnerToolAuthority, type ReassignmentStopTarget } from "./paperclip-runner-tool-authority.js";
 import { createAssignedMcpTools, getAssignedMcpGateway } from "./assigned-mcp-tools.js";
 import { getNativeReviewAssignment, readNativeReviewAssignmentContext } from "./native-review-participant.js";
 import { NativeChatAttachmentReadScope } from "./chat-attachment-read.js";
@@ -7278,7 +7278,7 @@ export async function executePaperclipNativeSession(input: {
   runnerRemoteCodexPath?: string | null;
   runnerRemoteCodexNpmSpec?: string | null;
   runnerRemoteProviderPackPath?: string | null;
-  stopTaskForReassignment?: (target: { companyId: string; issueId: string; agentId: string; runId: string | null }) => Promise<void>;
+  stopTaskForReassignment?: (target: ReassignmentStopTarget) => Promise<void>;
   syncIssueExternalObjects?: (issueId: string) => Promise<void>;
   enqueueWakeup?: (
     agentId: string,
@@ -10661,7 +10661,7 @@ export async function createRunnerdBackend(input: {
   trace?: NativeRunTrace;
   toolTrace?: NativeToolTrace;
   onLog?: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
-  stopTaskForReassignment?: (target: { companyId: string; issueId: string; agentId: string; runId: string | null }) => Promise<void>;
+  stopTaskForReassignment?: (target: ReassignmentStopTarget) => Promise<void>;
   syncIssueExternalObjects?: (issueId: string) => Promise<void>;
   enqueueWakeup?: (
     agentId: string,

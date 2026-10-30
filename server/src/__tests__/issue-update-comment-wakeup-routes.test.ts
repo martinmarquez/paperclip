@@ -19,6 +19,7 @@ const mockIssueService = vi.hoisted(() => ({
   listWakeableBlockedDependents: vi.fn(),
   getWakeableParentAfterChildCompletion: vi.fn(),
   getCurrentScheduledRetry: vi.fn(),
+  getAttachmentById: vi.fn(),
   listReviewAttention: vi.fn(),
 }));
 
@@ -34,8 +35,8 @@ const mockHeartbeatService = vi.hoisted(() => ({
   wakeup: vi.fn(async () => undefined),
   reportRunActivity: vi.fn(async () => undefined),
   getRun: vi.fn(async () => null),
-  getActiveRunForAgent: vi.fn(async () => null),
-  cancelRun: vi.fn(async () => null),
+  getActiveRunForAgent: vi.fn(async (_agentId?: string, _scope?: { includePending?: boolean }): Promise<any> => null),
+  cancelRun: vi.fn(async (): Promise<any> => null),
 }));
 const mockIssueThreadInteractionService = vi.hoisted(() => ({
   expirePendingInteractionsForTerminalIssue: vi.fn(async () => []),
@@ -43,7 +44,7 @@ const mockIssueThreadInteractionService = vi.hoisted(() => ({
   expireStaleRequestConfirmationsForIssueDocument: vi.fn(async () => []),
 }));
 const mockRunnerGoalService = vi.hoisted(() => ({
-  projection: vi.fn(async () => null),
+  projection: vi.fn(async (): Promise<any> => null),
   act: vi.fn(),
 }));
 
@@ -256,17 +257,173 @@ describe("issue update comment wakeups", () => {
     vi.doUnmock("../middleware/index.js");
     registerModuleMocks();
     vi.clearAllMocks();
+    mockRunnerGoalService.projection.mockReset();
+    mockRunnerGoalService.projection.mockResolvedValue(null);
+    mockRunnerGoalService.act.mockReset();
+    mockHeartbeatService.getRun.mockReset();
+    mockHeartbeatService.getRun.mockResolvedValue(null);
+    mockHeartbeatService.cancelRun.mockReset();
+    mockHeartbeatService.cancelRun.mockResolvedValue(null);
+    mockHeartbeatService.getActiveRunForAgent.mockReset();
+    mockHeartbeatService.getActiveRunForAgent.mockResolvedValue(null);
     mockAccessDecide.mockImplementation(async (input) => ({ allowed: true, action: input.action, reason: "allow_explicit_grant", explanation: "Allowed by test grant." }));
     mockPauseGate.mockResolvedValue(null);
     mockIssueService.findMentionedAgents.mockResolvedValue([]);
     mockIssueService.getByIdentifier.mockResolvedValue(null);
     mockIssueService.getByIdForUpdate.mockImplementation(async () => mockIssueService.getById());
     mockIssueService.getRelationSummaries.mockResolvedValue({ blockedBy: [], blocks: [] });
-    mockIssueService.getDependencyReadiness.mockResolvedValue({ unresolvedBlockerCount: 1 });
+    mockIssueService.getDependencyReadiness.mockResolvedValue({ unresolvedBlockerCount: 1, blockerIssueIds: ["unresolved-blocker"], isDependencyReady: false });
     mockIssueService.listWakeableBlockedDependents.mockResolvedValue([]);
     mockIssueService.getWakeableParentAfterChildCompletion.mockResolvedValue(null);
     mockIssueService.getCurrentScheduledRetry.mockResolvedValue(null);
     mockIssueService.listReviewAttention.mockResolvedValue(new Map());
+  });
+
+  it.each(["queued", "scheduled_retry", "running"])("stops an unlinked %s run before an assignment-only update", async (status) => {
+    const existing = makeIssue({ assigneeAgentId: PREVIOUS_AGENT_ID, assigneeUserId: null, status: "blocked" });
+    const pending = { id: "pending-reassignment", companyId: existing.companyId,
+      agentId: PREVIOUS_AGENT_ID, nativeIssueId: existing.id, status, contextSnapshot: {} };
+    mockIssueService.getById.mockResolvedValue(existing);
+    let stopped = false;
+    mockHeartbeatService.getActiveRunForAgent.mockImplementation(async (_agentId, scope) =>
+      scope?.includePending && !stopped ? pending : null);
+    mockHeartbeatService.cancelRun.mockImplementation(async () => { stopped = true; return { ...pending, status: "cancelled" }; });
+    mockIssueService.update.mockImplementation(async () => {
+      expect(stopped).toBe(true);
+      return { ...existing, assigneeAgentId: ASSIGNEE_AGENT_ID };
+    });
+    const response = await request(await createApp()).patch(`/api/issues/${existing.id}`)
+      .send({ assigneeAgentId: ASSIGNEE_AGENT_ID, assigneeUserId: null, deferWakeForGoal: true });
+    expect(response.status).toBe(200);
+    expect(mockHeartbeatService.getActiveRunForAgent).toHaveBeenCalledWith(PREVIOUS_AGENT_ID,
+      expect.objectContaining({ companyId: existing.companyId, issueId: existing.id, includePending: true }));
+    expect(mockHeartbeatService.cancelRun).toHaveBeenCalledWith(pending.id, "Cancelled before issue reassignment",
+      expect.objectContaining({ errorCode: "issue_reassigned", suppressImmediateRecovery: true }));
+    expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
+  });
+
+  it("does not assign or wake the next owner when a pending retry cannot stop", async () => {
+    const existing = makeIssue({ assigneeAgentId: PREVIOUS_AGENT_ID, assigneeUserId: null });
+    const retry = { id: "retry-not-stopped", companyId: existing.companyId,
+      agentId: PREVIOUS_AGENT_ID, nativeIssueId: existing.id, status: "scheduled_retry" };
+    mockIssueService.getById.mockResolvedValue(existing);
+    mockHeartbeatService.getActiveRunForAgent.mockImplementation(async (_agentId, scope) => scope?.includePending ? retry : null);
+    mockHeartbeatService.cancelRun.mockResolvedValue(retry);
+    const response = await request(await createApp()).patch(`/api/issues/${existing.id}`)
+      .send({ assigneeAgentId: ASSIGNEE_AGENT_ID, assigneeUserId: null });
+    expect(response.status).toBe(409);
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+    expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
+  });
+
+  it("ignores a stale pointer to a different native task instead of cancelling or blocking that run", async () => {
+    const existing = makeIssue({ assigneeAgentId: PREVIOUS_AGENT_ID, assigneeUserId: null,
+      executionRunId: "other-task-run", status: "blocked" });
+    mockIssueService.getById.mockResolvedValue(existing);
+    mockHeartbeatService.getRun.mockResolvedValue({ id: "other-task-run", companyId: existing.companyId,
+      agentId: PREVIOUS_AGENT_ID, nativeIssueId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", status: "running" });
+    mockIssueService.update.mockResolvedValue({ ...existing, assigneeAgentId: ASSIGNEE_AGENT_ID });
+    const response = await request(await createApp()).patch(`/api/issues/${existing.id}`)
+      .send({ assigneeAgentId: ASSIGNEE_AGENT_ID, assigneeUserId: null, deferWakeForGoal: true });
+    expect(response.status).toBe(200);
+    expect(mockHeartbeatService.getActiveRunForAgent).toHaveBeenCalledWith(PREVIOUS_AGENT_ID,
+      expect.objectContaining({ issueId: existing.id, includePending: true }));
+    expect(mockHeartbeatService.cancelRun).not.toHaveBeenCalled();
+    expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
+  });
+
+  it("passes the separate checkout pointer to the scoped reassignment lookup", async () => {
+    const existing = makeIssue({ assigneeAgentId: PREVIOUS_AGENT_ID, assigneeUserId: null,
+      executionRunId: null, checkoutRunId: "checkout-only-run", status: "blocked" });
+    mockIssueService.getById.mockResolvedValue(existing);
+    mockIssueService.update.mockResolvedValue({ ...existing, assigneeAgentId: ASSIGNEE_AGENT_ID });
+    const response = await request(await createApp()).patch(`/api/issues/${existing.id}`)
+      .send({ assigneeAgentId: ASSIGNEE_AGENT_ID, assigneeUserId: null, deferWakeForGoal: true });
+    expect(response.status).toBe(200);
+    expect(mockHeartbeatService.getActiveRunForAgent).toHaveBeenCalledWith(PREVIOUS_AGENT_ID,
+      expect.objectContaining({ issueId: existing.id, executionRunId: null, checkoutRunId: "checkout-only-run", includePending: true }));
+  });
+
+  it.each([true, false])("recovers a timed-out goal stop only if its action was accepted (%s)", async accepted => {
+    const existing = makeIssue({ assigneeAgentId: PREVIOUS_AGENT_ID, assigneeUserId: null,
+      status: "in_progress", statusVersion: 7, executionRunId: null, checkoutRunId: null });
+    mockIssueService.getById.mockResolvedValue(existing);
+    mockRunnerGoalService.projection.mockResolvedValue({ goal: { status: "running" },
+      capability: { actions: ["pause"] }, pendingAction: null, revision: 1 });
+    const now = Date.now();
+    let restoreClock: (() => void) | undefined;
+    mockRunnerGoalService.act.mockImplementation(async () => {
+      if (!accepted) throw new Error("pause rejected");
+      let tick = 0;
+      const clock = vi.spyOn(Date, "now").mockImplementation(() => now + 40_000 * tick++);
+      restoreClock = () => { clock.mockRestore(); };
+    });
+    try {
+      const response = await request(await createApp()).patch(`/api/issues/${existing.id}`)
+        .send({ assigneeAgentId: ASSIGNEE_AGENT_ID, assigneeUserId: null });
+      expect(response.status).toBe(accepted ? 409 : 500);
+      expect(mockIssueService.update).not.toHaveBeenCalled();
+      if (accepted) expect(mockHeartbeatService.wakeup).toHaveBeenCalledExactlyOnceWith(PREVIOUS_AGENT_ID,
+        expect.objectContaining({ issueStateGuard: { statuses: ["in_progress"], assigneeAgentId: PREVIOUS_AGENT_ID,
+          statusVersion: 7 }, payload: { issueId: existing.id, mutation: "reassignment_rollback", stoppedRunIds: [] } }));
+      else expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
+    } finally { restoreClock?.(); }
+  });
+
+  it.each(["succeeded", "running"])("treats an outside %s checkout correctly during failed handoff recovery", async status => {
+    const existing = makeIssue({ assigneeAgentId: PREVIOUS_AGENT_ID, assigneeUserId: null, status: "in_progress",
+      statusVersion: 7, executionRunId: null, checkoutRunId: "earlier-checkout" });
+    const retry = { id: "retry", companyId: existing.companyId, agentId: PREVIOUS_AGENT_ID,
+      nativeIssueId: existing.id, status: "scheduled_retry" };
+    mockIssueService.getById.mockResolvedValue(existing);
+    mockHeartbeatService.getRun.mockResolvedValue({ id: "earlier-checkout", companyId: existing.companyId,
+      agentId: PREVIOUS_AGENT_ID, status });
+    let stopped = false;
+    mockHeartbeatService.getActiveRunForAgent.mockImplementation(async (_agentId, scope) =>
+      scope?.includePending && !stopped ? retry : null);
+    mockHeartbeatService.cancelRun.mockImplementation(async () => { stopped = true; return { ...retry, status: "cancelled" }; });
+    mockIssueService.update.mockRejectedValue(new Error("transaction rejected"));
+    const response = await request(await createApp()).patch(`/api/issues/${existing.id}`)
+      .send({ assigneeAgentId: ASSIGNEE_AGENT_ID, assigneeUserId: null });
+    expect(response.status).toBe(500);
+    if (status === "succeeded") expect(mockHeartbeatService.wakeup).toHaveBeenCalledTimes(1);
+    else expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
+  });
+
+  it("rejects a foreign comment attachment before stopping the previous owner", async () => {
+    const existing = makeIssue({ assigneeAgentId: PREVIOUS_AGENT_ID, assigneeUserId: null, status: "in_progress" });
+    mockIssueService.getById.mockResolvedValue(existing);
+    mockIssueService.getAttachmentById.mockResolvedValue({ companyId: existing.companyId,
+      issueId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" });
+    const response = await request(await createApp()).patch(`/api/issues/${existing.id}`).send({
+      assigneeAgentId: ASSIGNEE_AGENT_ID, assigneeUserId: null, comment: "handoff",
+      attachmentIds: ["cccccccc-cccc-4ccc-8ccc-cccccccccccc"],
+    });
+    expect(response.status).toBe(422);
+    expect(mockHeartbeatService.cancelRun).not.toHaveBeenCalled();
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+    expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
+  });
+
+  it.each(["unchanged", "new-owner", "new-version"])("restores only the unchanged runnable owner after a failed update (%s)", async state => {
+    const existing = makeIssue({ assigneeAgentId: PREVIOUS_AGENT_ID, assigneeUserId: null,
+      status: "in_progress", statusVersion: 7, executionRunId: null, checkoutRunId: null });
+    const current = state === "new-owner" ? { ...existing, assigneeAgentId: ASSIGNEE_AGENT_ID }
+      : state === "new-version" ? { ...existing, statusVersion: 8 } : existing;
+    mockIssueService.getById.mockResolvedValueOnce(existing).mockResolvedValue(current);
+    const run = { id: "stopped-before-failed-update", companyId: existing.companyId,
+      agentId: PREVIOUS_AGENT_ID, nativeIssueId: existing.id, status: "queued" };
+    let stopped = false;
+    mockHeartbeatService.getActiveRunForAgent.mockImplementation(async (_agent, scope) => scope?.includePending && !stopped ? run : null);
+    mockHeartbeatService.cancelRun.mockImplementation(async () => { stopped = true; return { ...run, status: "cancelled" }; });
+    mockIssueService.update.mockRejectedValue(new Error("transaction rejected"));
+    const response = await request(await createApp()).patch(`/api/issues/${existing.id}`)
+      .send({ assigneeAgentId: ASSIGNEE_AGENT_ID, assigneeUserId: null });
+    expect(response.status).toBe(500);
+    if (state === "unchanged") expect(mockHeartbeatService.wakeup).toHaveBeenCalledExactlyOnceWith(PREVIOUS_AGENT_ID,
+      expect.objectContaining({ issueStateGuard: { statuses: ["in_progress"], assigneeAgentId: PREVIOUS_AGENT_ID, statusVersion: 7 },
+        payload: { issueId: existing.id, mutation: "reassignment_rollback", stoppedRunIds: [run.id] } }));
+    else expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
   });
 
   it.each(["post", "patch"] as const)("rejects %s board messages under an inherited pause before any mutation", async (method) => {
