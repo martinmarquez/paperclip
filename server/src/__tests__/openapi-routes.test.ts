@@ -803,6 +803,10 @@ describe("openapi routes", () => {
     expect(create.responses["202"]).toBeDefined();
     expect(create.responses["409"]).toBeDefined();
     expect(create.responses["429"]).toBeDefined();
+    expect(create.responses["503"].content["application/json"].schema.oneOf).toEqual([
+      expect.objectContaining({ required: ["error"] }),
+      expect.objectContaining({ required: ["status", "dispatchAllowed"] }),
+    ]);
     expect(read.responses["410"]).toBeDefined();
     expect(create.parameters).toContainEqual(expect.objectContaining({ in: "header", name: "idempotency-key", required: true }));
   });

@@ -4583,7 +4583,7 @@ registry.registerPath({
     409: r.conflict, 429: r.tooManyRequests,
     503: {
       description: "Subject unavailable or reservation outcome uncertain; do not replay extraction",
-      content: { "application/json": { schema: z.union([ErrorSchema, z.object({ status: z.literal("uncertain"), dispatchAllowed: z.literal(false) })]) } },
+      content: { "application/json": { schema: z.union([z.object({ error: z.string() }), z.object({ status: z.literal("uncertain"), dispatchAllowed: z.literal(false) })]) } },
     },
   },
 });
