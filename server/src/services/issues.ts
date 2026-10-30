@@ -11016,7 +11016,7 @@ export function issueService(db: Db) {
             const [live] = await tx.select({ id: heartbeatRuns.id }).from(heartbeatRuns)
               .where(and(eq(heartbeatRuns.agentId, receiptExisting.assigneeAgentId),
                 taskRunBinding({ companyId: receiptExisting.companyId, issueId: id,
-                  executionRunId: receiptExisting.executionRunId }),
+                  executionRunId: receiptExisting.executionRunId, checkoutRunId: receiptExisting.checkoutRunId }),
                 inArray(heartbeatRuns.status, ["running", "queued", "scheduled_retry"])))
               .for("update").limit(1);
             if (live) throw conflict("Stop the previous owner's task executions before reassignment", {

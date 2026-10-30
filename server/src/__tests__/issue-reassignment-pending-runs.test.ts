@@ -89,10 +89,20 @@ describePostgres("pending task runs at the ownership boundary", () => {
     await expect(issueService(db).update(f.issueId, { assigneeAgentId: f.nextId })).rejects.toThrow();
   });
 
+  it("preserves a live checkout when its separate execution pointer was cleared", async () => {
+    const f = await fixture(), checkout = await seed(f, "running", "none");
+    await db.update(issues).set({ checkoutRunId: checkout, executionRunId: null }).where(eq(issues.id, f.issueId));
+    expect(await f.heartbeat.getActiveRunForAgent(f.agentId, { companyId: f.companyId, issueId: f.issueId,
+      executionRunId: null, checkoutRunId: checkout, includePending: true })).toMatchObject({ id: checkout });
+    await expect(issueService(db).update(f.issueId, { assigneeAgentId: f.nextId }))
+      .rejects.toMatchObject({ details: { code: "issue_reassignment_stop_unconfirmed", runId: checkout } });
+    expect(await f.task()).toMatchObject({ assigneeAgentId: f.agentId, checkoutRunId: checkout });
+  });
+
   it("recognizes UUIDv7 aliases with uppercase and surrounding whitespace", async () => {
     const f = await fixture("019a8cdb-1234-7a12-8abc-0123456789ab");
     const runId = await seed(f, "scheduled_retry", "task");
-    const alias = ` ${f.issueId.toUpperCase()} `;
+    const alias = `\t\n\u00a0${f.issueId.toUpperCase()}\ufeff\r\n`;
     await db.update(heartbeatRuns).set({ contextSnapshot: { taskId: alias } }).where(eq(heartbeatRuns.id, runId));
     expect(await f.heartbeat.getActiveRunForAgent(f.agentId, { companyId: f.companyId,
       issueId: f.issueId, includePending: true })).toMatchObject({ id: runId });
@@ -101,7 +111,7 @@ describePostgres("pending task runs at the ownership boundary", () => {
     await db.update(heartbeatRuns).set({ contextSnapshot: { taskId: alias } }).where(eq(heartbeatRuns.id, source));
     const retry = await f.heartbeat.scheduleBoundedRetry(source, { delayMs: 60_000 });
     expect(retry).toMatchObject({ outcome: "scheduled" });
-    if (retry.outcome === "scheduled") expect(retry.run.contextSnapshot?.issueId).toBe(f.issueId.toUpperCase());
+    if (retry.outcome === "scheduled") expect(retry.run.contextSnapshot?.issueId).toBe(f.issueId);
   });
 
   it("retains a non-UUID task-session key on an unscoped failure retry", async () => {

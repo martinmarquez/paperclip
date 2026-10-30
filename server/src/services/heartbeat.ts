@@ -1,4 +1,4 @@
-import { canonicalRunTaskId, isTaskUuid, taskRunBinding } from "./task-run-identity.js";
+import { canonicalRunTaskId, normalizeTaskUuid, taskRunBinding } from "./task-run-identity.js";
 import { retryIdempotentDatabaseOperation } from "../database-retry.js";
 import { prepareConnectionInstructionDelivery } from "./connection-instructions.js";
 import { resolveAssignedConnectionInstructionsForRun } from "./native-runtime/assigned-mcp-tools.js";
@@ -11228,10 +11228,9 @@ export function heartbeatService(
     run: typeof heartbeatRuns.$inferSelect,
     contextSnapshot: Record<string, unknown>,
   ) {
-    const issueId =
-      readNonEmptyString(contextSnapshot.issueId) ??
-      readNonEmptyString(contextSnapshot.taskId);
-    const issueContext = issueId && isTaskUuid(issueId)
+    const issueId = run.nativeIssueId ?? normalizeTaskUuid(contextSnapshot.issueId) ??
+      normalizeTaskUuid(contextSnapshot.taskId);
+    const issueContext = issueId
       ? await getIssueExecutionContext(run.companyId, issueId)
       : null;
     return resolveResponsibleUserIdForRun({
@@ -15519,13 +15518,12 @@ export function heartbeatService(
         : null;
     const transientRetryNotBefore = transientRecovery?.retryNotBefore ?? null;
     const contextSnapshot = parseObject(run.contextSnapshot);
-    const taskAlias = readNonEmptyString(contextSnapshot.taskId);
-    let issueId = run.nativeIssueId ?? readNonEmptyString(contextSnapshot.issueId) ??
-      (isTaskUuid(taskAlias) ? taskAlias : null);
+    let issueId = run.nativeIssueId ?? normalizeTaskUuid(contextSnapshot.issueId) ??
+      normalizeTaskUuid(contextSnapshot.taskId);
     if (!issueId && run.wakeupRequestId) {
       const [binding] = await db.select({ issueId: canonicalRunTaskId }).from(heartbeatRuns)
         .where(and(eq(heartbeatRuns.companyId, run.companyId), eq(heartbeatRuns.id, run.id)));
-      issueId = isTaskUuid(binding?.issueId) ? binding!.issueId : null;
+      issueId = normalizeTaskUuid(binding?.issueId);
     }
 
     if (!baseSchedule) {
@@ -25099,9 +25097,13 @@ export function heartbeatService(
                           throw conflict("Reassignment run binding changed");
                         }
                       }
+                      const [task] = await db.select({ checkoutRunId: issues.checkoutRunId,
+                        executionRunId: issues.executionRunId, assigneeAgentId: issues.assigneeAgentId })
+                        .from(issues).where(and(eq(issues.companyId, target.companyId), eq(issues.id, target.issueId)));
+                      if (!task || task.assigneeAgentId !== target.agentId) throw conflict("Reassignment owner changed");
                       const pending = await db.select().from(heartbeatRuns).where(and(
                         eq(heartbeatRuns.agentId, target.agentId),
-                        taskRunBinding({ ...target, executionRunId: target.runId }),
+                        taskRunBinding({ ...target, executionRunId: task.executionRunId, checkoutRunId: task.checkoutRunId }),
                         inArray(heartbeatRuns.status, ["running", "queued", "scheduled_retry"]),
                       )).orderBy(asc(heartbeatRuns.id)).limit(101);
                       if (pending.length > 100) throw conflict("Too many pending task runs; inspect before reassignment");
@@ -30740,7 +30742,7 @@ export function heartbeatService(
     },
 
     getActiveRunForAgent: async (agentId: string, task?: {
-      companyId: string; issueId: string; executionRunId?: string | null; includePending?: boolean;
+      companyId: string; issueId: string; executionRunId?: string | null; checkoutRunId?: string | null; includePending?: boolean;
     }) => {
       const [run] = await db
         .select()

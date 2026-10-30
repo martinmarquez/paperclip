@@ -1,3 +1,4 @@
+import { taskRunBinding } from "../task-run-identity.js";
 import { setIssueTitle } from "../issue-title.js";
 import { externalObjectService } from "../external-objects.js";
 import { instanceSettingsService } from "../instance-settings.js";
@@ -38,7 +39,7 @@ import { badRequest, forbidden, notFound, HttpError } from "../../errors.js";
 import { searchRunnerApi } from "./runner-api-catalog.js";
 import { executeRunnerApi, validateRunnerApiCall, RUNNER_API_MAX_BYTES, type RunnerApiFile } from "./runner-api-client.js";
 import { acquireRunnerApiResponseSlot, runnerApiCompanyCaptureMaxBytes, RUNNER_API_RESPONSE_MAX_BYTES, RUNNER_API_RESPONSE_RUN_MAX_BYTES, RunnerApiResponseLimitError } from "./runner-api-response-limits.js";
-import { and, desc, eq, isNull, notInArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, notInArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   activityLog,
@@ -1199,32 +1200,42 @@ export class PaperclipRunnerToolAuthority {
       const target = await authorize(tx as unknown as Db, context.run);
       if (await priorReceipt(tx as unknown as Db)) return null;
       validate(target);
-      return target;
+      const pending = target.assigneeAgentId ? await tx.select({ id: heartbeatRuns.id }).from(heartbeatRuns)
+        .where(and(eq(heartbeatRuns.agentId, target.assigneeAgentId),
+          taskRunBinding({ companyId: this.binding.companyId, issueId: taskId,
+            executionRunId: target.executionRunId, checkoutRunId: target.checkoutRunId }),
+          inArray(heartbeatRuns.status, ["running", "queued", "scheduled_retry"])))
+        .orderBy(asc(heartbeatRuns.id)).limit(101) : [];
+      if (pending.length > 100) throw new Error("paperclip_runner_reassignment_stop_unavailable: inspect pending task executions");
+      return { ...target, reassignmentRunIds: pending.map(run => run.id) };
     });
     // Cancellation and ownership commit cannot share locks. If the second
     // phase loses its preconditions, restore runnable work to the still-current
     // prior owner. The durable wake key deduplicates retries; the state guard
     // closes races with later reassignment, completion, and manual holds.
     const restoreInterruptedWork = async (error: unknown) => {
-      if (!prepared?.executionRunId || !prepared.assigneeAgentId || !this.binding.enqueueWakeup) return;
-      const [stopped] = await this.db.select().from(heartbeatRuns).where(and(
-        eq(heartbeatRuns.id, prepared.executionRunId), eq(heartbeatRuns.companyId, this.binding.companyId),
+      if (!prepared?.assigneeAgentId || !prepared.reassignmentRunIds.length || !this.binding.enqueueWakeup) return;
+      const stopped = await this.db.select().from(heartbeatRuns).where(and(
+        inArray(heartbeatRuns.id, prepared.reassignmentRunIds), eq(heartbeatRuns.companyId, this.binding.companyId),
         eq(heartbeatRuns.agentId, prepared.assigneeAgentId), eq(heartbeatRuns.status, "cancelled"),
         eq(heartbeatRuns.errorCode, "issue_reassigned"),
-      ));
-      if (!stopped) return;
+      )).orderBy(asc(heartbeatRuns.id));
+      if (!stopped.length) return;
+      const stoppedIds = new Set(stopped.map(run => run.id));
+      const interruptedRunId = prepared.executionRunId && stoppedIds.has(prepared.executionRunId)
+        ? prepared.executionRunId : stopped[0]!.id;
       const [current] = await this.db.select().from(issues).where(and(
         eq(issues.id, taskId), eq(issues.companyId, this.binding.companyId),
       ));
       if (!current || current.assigneeAgentId !== prepared.assigneeAgentId || current.assigneeUserId ||
           current.conversationAgentId || !["todo", "in_progress"].includes(current.status) ||
           record(current.executionState).status === "pending") return;
-      if (current.executionRunId && current.executionRunId !== prepared.executionRunId) return;
+      if ([current.executionRunId, current.checkoutRunId].some(id => id && !stoppedIds.has(id))) return;
       try {
         await this.binding.enqueueWakeup(current.assigneeAgentId, {
           source: "assignment", triggerDetail: "system", reason: "issue_assigned",
-          payload: { issueId: taskId, mutation: "reassign_task_rollback", interruptedRunId: prepared.executionRunId },
-          idempotencyKey: `${durableKey}:restore:${prepared.executionRunId}:${current.statusVersion}`,
+          payload: { issueId: taskId, mutation: "reassign_task_rollback", interruptedRunId },
+          idempotencyKey: `${durableKey}:restore:${interruptedRunId}:${current.statusVersion}`,
           requestedByActorType: "agent", requestedByActorId: this.binding.agentId,
           contextSnapshot: { issueId: taskId, source: "paperclip_runner.reassign_task_rollback", forceFreshSession: true },
           issueStateGuard: { statuses: ["todo", "in_progress"], assigneeAgentId: current.assigneeAgentId, statusVersion: current.statusVersion },
@@ -1234,7 +1245,7 @@ export class PaperclipRunnerToolAuthority {
       }
     };
     if (prepared && prepared.assigneeAgentId && prepared.assigneeAgentId !== assigneeAgentId) {
-      if (prepared.executionRunId && (!this.binding.stopTaskForReassignment || !this.binding.enqueueWakeup)) {
+      if (prepared.reassignmentRunIds.length && (!this.binding.stopTaskForReassignment || !this.binding.enqueueWakeup)) {
         throw new Error("paperclip_runner_reassignment_stop_unavailable");
       }
       try {

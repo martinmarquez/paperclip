@@ -13506,17 +13506,27 @@ export function issueRoutes(
       // Only this request may finish a mutation that intentionally stops its
       // own run (for example handing work to a signoff reviewer).
       const issueMutationStopId = randomUUID();
-      if (assigneeWillChange && existing.assigneeAgentId) {
-        await stopRunnerGoalForOwnershipChange({
+      const confirmedReassignmentStops: string[] = [];
+      let reassignmentGoalStopped = false;
+      const stopForReassignment = async () => {
+        if (!assigneeWillChange || !existing.assigneeAgentId) return;
+        for (const attachmentId of new Set(commentAttachmentIds ?? [])) {
+          const attachment = await svc.getAttachmentById(attachmentId);
+          if (!attachment || attachment.companyId !== existing.companyId || attachment.issueId !== existing.id) {
+            throw unprocessable("Comment attachments must belong to the same task and company");
+          }
+        }
+        const goalStop = await stopRunnerGoalForOwnershipChange({
           companyId: existing.companyId,
           issueId: existing.id,
           agentId: existing.assigneeAgentId,
         });
+        reassignmentGoalStopped = Boolean(goalStop);
         const stoppedRunIds = new Set<string>();
         while (true) {
           const runToStopForReassignment = await heartbeat.getActiveRunForAgent(existing.assigneeAgentId, {
             companyId: existing.companyId, issueId: existing.id,
-            executionRunId: existing.executionRunId, includePending: true,
+            executionRunId: existing.executionRunId, checkoutRunId: existing.checkoutRunId, includePending: true,
           });
           if (!runToStopForReassignment) break;
           if (stoppedRunIds.has(runToStopForReassignment.id) || stoppedRunIds.size >= 100) {
@@ -13549,9 +13559,28 @@ export function issueRoutes(
               },
             );
           }
+          confirmedReassignmentStops.push(cancelled.id);
           interruptedRunId ??= cancelled.id;
         }
-      }
+      };
+      const restoreFailedReassignment = async () => {
+        if ((!confirmedReassignmentStops.length && !reassignmentGoalStopped) || !existing.assigneeAgentId ||
+            !["todo", "in_progress"].includes(existing.status)) return;
+        const current = await svc.getById(existing.id);
+        if (!current || current.assigneeAgentId !== existing.assigneeAgentId ||
+            current.assigneeUserId !== existing.assigneeUserId || current.status !== existing.status ||
+            current.statusVersion !== existing.statusVersion ||
+            [current.executionRunId, current.checkoutRunId].some(runId => runId && !confirmedReassignmentStops.includes(runId))) return;
+        await heartbeat.wakeup(existing.assigneeAgentId, {
+          source: "automation", triggerDetail: "system", reason: "issue_assigned",
+          requestedByActorType: actor.actorType, requestedByActorId: actor.actorId,
+          idempotencyKey: `issue-reassignment-rollback:${existing.id}:${issueMutationStopId}`,
+          payload: { issueId: existing.id, mutation: "reassignment_rollback", stoppedRunIds: confirmedReassignmentStops },
+          contextSnapshot: { issueId: existing.id, source: "issue.update", reassignmentRollback: true },
+          issueStateGuard: { statuses: [existing.status], assigneeAgentId: existing.assigneeAgentId,
+            statusVersion: existing.statusVersion },
+        });
+      };
 
       const terminalizingIssue =
         typeof updateFields.status === "string" &&
@@ -13639,6 +13668,7 @@ export function issueRoutes(
       const shouldCollectTerminalIssueActions =
         updateFields.status === "done" || updateFields.status === "cancelled";
       const updateIssue = (tx?: Parameters<typeof svc.update>[2]) => {
+        issueUpdateData.actorRunStopId = actor.agentId && interruptedRunId === actor.runId ? issueMutationStopId : null;
         if (tx) {
           if (shouldCollectCompletionPublication) {
             return svc.update(
@@ -13783,6 +13813,7 @@ export function issueRoutes(
         persistReviewActivityTransactionally ||
         reviewPolicySensitiveMutationRequested;
       try {
+        await stopForReassignment();
         if (shouldUseTransactionalIssueUpdate) {
           issue = await db.transaction(async (tx) => {
             if (
@@ -13846,6 +13877,8 @@ export function issueRoutes(
           issue = await updateIssue();
         }
       } catch (err) {
+        try { await restoreFailedReassignment(); }
+        catch (restoreError) { throw new AggregateError([err, restoreError], "issue_reassignment_restore_failed"); }
         if (err instanceof HttpError && err.status === 422) {
           logger.warn(
             {
@@ -13874,6 +13907,7 @@ export function issueRoutes(
         throw err;
       }
       if (!issue) {
+        await restoreFailedReassignment();
         res.status(404).json({ error: "Issue not found" });
         return;
       }

@@ -130,6 +130,23 @@ describe("runner task reassignment", () => {
     }));
   });
 
+  it("restores a stopped unlinked retry when the native reassignment loses its version", async () => {
+    const f = await fixture();
+    const retryId = randomUUID();
+    await db.insert(heartbeatRuns).values({ id: retryId, companyId: f.companyId, agentId: f.agentId,
+      nativeIssueId: f.targetId, status: "scheduled_retry", invocationSource: "automation", triggerDetail: "system" });
+    f.stopTaskForReassignment.mockImplementationOnce(async () => {
+      await db.update(heartbeatRuns).set({ status: "cancelled", errorCode: "issue_reassigned" }).where(eq(heartbeatRuns.id, retryId));
+      await db.update(issues).set({ statusVersion: 1 }).where(eq(issues.id, f.targetId));
+    });
+    await expect(f.authority.execute(f.call)).rejects.toThrow("reassignment_conflict");
+    expect((await f.target()).assigneeAgentId).toBe(f.agentId);
+    expect(f.enqueueWakeup).toHaveBeenCalledExactlyOnceWith(f.agentId, expect.objectContaining({
+      payload: { issueId: f.targetId, mutation: "reassign_task_rollback", interruptedRunId: retryId },
+      issueStateGuard: { statuses: ["todo", "in_progress"], assigneeAgentId: f.agentId, statusVersion: 1 },
+    }));
+  });
+
   it.each(["owner", "closed", "new-run"])("does not compensate over a newer %s decision", async conflict => {
     const f = await fixture("in_progress");
     const oldRun = randomUUID();

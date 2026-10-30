@@ -1667,8 +1667,8 @@ The issue service then locks the task row and refuses the assignment if another
 old-owner run remains or appeared during Stop. This fence also applies to service
 and plugin writes. It does not cancel another owner's run or unrelated task work.
 Native task identity takes precedence over UUID aliases in legacy `issueId`/`taskId`
-and wake payloads. Non-UUID session keys do not become task bindings. The execution pointer is a fallback only when the run has no task
-identity. Company and old-owner scope remain mandatory.
+and wake payloads. Non-UUID session keys do not become task bindings. The execution and checkout pointers remain distinct fallbacks when the run has
+no task identity. Company and old-owner scope remain mandatory.
 
 Generic failure retries recheck ownership under the scheduler's task-row lock
 before insertion. This check retains the existing current-review-participant and
@@ -1676,3 +1676,13 @@ non-assignee workspace-wait exceptions. It does not change retry budgets, accoun
 selection, pause gates or provider termination rules. A concurrent run that
 prevents the handoff produces a conflict for a fresh decision; the control plane
 does not force the ownership write.
+
+Before Stop, the HTTP handoff checks that comment attachments belong to the same
+task and company. The comment transaction still checks and locks the actual
+binding. If Stop succeeds but the ownership update fails, the HTTP path requests
+a guarded wake only for the unchanged runnable prior owner and state version.
+A newer owner, version, status, checkout or execution claim prevents that wake.
+The native path captures pending run IDs during its locked preflight so rollback
+can also recognize a stopped retry that had no execution pointer. Its existing
+state-guarded compensation continues to respect newer ownership and manual holds.
+Neither path overrides a budget, pause, review or execution-reconciliation gate.
