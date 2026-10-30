@@ -11,7 +11,7 @@ vi.mock("./issues.js", () => ({
 
 type SelectRow = Record<string, unknown>;
 
-function createSelectChain(rows: SelectRow[]) {
+function createSelectChain(rows: SelectRow[], onLock: (mode: string) => void) {
   return {
     from() {
       const query = {
@@ -20,6 +20,10 @@ function createSelectChain(rows: SelectRow[]) {
         },
         where() {
           return {
+            for(mode: string) {
+              onLock(mode);
+              return Promise.resolve(rows);
+            },
             then(callback: (rows: SelectRow[]) => unknown) {
               return Promise.resolve(callback(rows));
             },
@@ -40,12 +44,13 @@ function createFakeDb(args: {
   const interactionUpdates: Array<Record<string, unknown>> = [];
   const toolActionRequestUpdates: Array<Record<string, unknown>> = [];
   const inserts: Array<{ table: string; values: Record<string, unknown> }> = [];
+  const locks: string[] = [];
   let selectCallCount = 0;
 
   const db: any = {
     select: vi.fn(() => {
       selectCallCount += 1;
-      return createSelectChain(selectCallCount === 1 ? [interactionRow] : (args.parentRows ?? []));
+      return createSelectChain(selectCallCount === 1 ? [interactionRow] : (args.parentRows ?? []), (mode) => locks.push(mode));
     }),
     update: vi.fn((table: unknown) => ({
       set(values: Record<string, unknown>) {
@@ -86,6 +91,7 @@ function createFakeDb(args: {
     interactionUpdates,
     toolActionRequestUpdates,
     inserts,
+    locks,
   };
 }
 
@@ -266,6 +272,7 @@ describe("issueThreadInteractionService", () => {
     });
 
     expect(result.status).toBe("answered");
+    expect(state.locks).toEqual(["update"]);
     expect(result.result).toEqual({
       version: 1,
       answers: [
@@ -302,6 +309,7 @@ describe("issueThreadInteractionService", () => {
     const svc = issueThreadInteractionService(state.db as never);
     const withdrawn = await svc.withdrawInteraction({ id: interactionRow.issueId, companyId: "company-1" }, interactionRow.id, { reason: "Replanning" }, { agentId: "agent-1" });
     expect(withdrawn.status).toBe("cancelled");
+    expect(state.locks).toEqual(["update"]);
     expect(withdrawn.result).toEqual({ version: 1, outcome: "withdrawn", reason: "Replanning" });
     expect(withdrawn.resolvedByAgentId).toBe("agent-1");
     expect(state.toolActionRequestUpdates).toHaveLength(1);
