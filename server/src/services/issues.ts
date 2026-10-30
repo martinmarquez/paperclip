@@ -1,3 +1,4 @@
+import { taskRunBinding } from "./task-run-identity.js";
 import { recordChatHandoff, recordChatCompletion, existingChatCompletionReply, acknowledgeChatCompletionReply } from "./chat-completion-delivery.js";
 import { mirrorSlackBoardComment, slackBoardReplyBindings } from "./slack-board-messages.js";
 import { assertAgentRunWriteAllowed } from "../agent-run-cancellation.js";
@@ -11010,6 +11011,18 @@ export function issueService(db: Db) {
         // stays the same, including an A -> B -> A assignment race.
         if ((issueData.assigneeAgentId !== undefined && issueData.assigneeAgentId !== receiptExisting.assigneeAgentId)
           || (issueData.assigneeUserId !== undefined && issueData.assigneeUserId !== receiptExisting.assigneeUserId)) {
+          if (receiptExisting.assigneeAgentId) {
+            // Stop outside this transaction, then fence a successor that won the race.
+            const [live] = await tx.select({ id: heartbeatRuns.id }).from(heartbeatRuns)
+              .where(and(eq(heartbeatRuns.agentId, receiptExisting.assigneeAgentId),
+                taskRunBinding({ companyId: receiptExisting.companyId, issueId: id,
+                  executionRunId: receiptExisting.executionRunId }),
+                inArray(heartbeatRuns.status, ["running", "queued", "scheduled_retry"])))
+              .for("update").limit(1);
+            if (live) throw conflict("Stop the previous owner's task executions before reassignment", {
+              code: "issue_reassignment_stop_unconfirmed", runId: live.id,
+            });
+          }
           patch.statusVersion = sql`${issues.statusVersion} + 1` as unknown as number;
           // Invalidate human direction at the common assignment boundary, including
           // plugin/service writes that do not go through HTTP run cancellation.

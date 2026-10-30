@@ -34,8 +34,8 @@ const mockHeartbeatService = vi.hoisted(() => ({
   wakeup: vi.fn(async () => undefined),
   reportRunActivity: vi.fn(async () => undefined),
   getRun: vi.fn(async () => null),
-  getActiveRunForAgent: vi.fn(async () => null),
-  cancelRun: vi.fn(async () => null),
+  getActiveRunForAgent: vi.fn(async (_agentId?: string, _scope?: { includePending?: boolean }): Promise<any> => null),
+  cancelRun: vi.fn(async (): Promise<any> => null),
 }));
 const mockIssueThreadInteractionService = vi.hoisted(() => ({
   expirePendingInteractionsForTerminalIssue: vi.fn(async () => []),
@@ -256,6 +256,10 @@ describe("issue update comment wakeups", () => {
     vi.doUnmock("../middleware/index.js");
     registerModuleMocks();
     vi.clearAllMocks();
+    mockHeartbeatService.cancelRun.mockReset();
+    mockHeartbeatService.cancelRun.mockResolvedValue(null);
+    mockHeartbeatService.getActiveRunForAgent.mockReset();
+    mockHeartbeatService.getActiveRunForAgent.mockResolvedValue(null);
     mockAccessDecide.mockImplementation(async (input) => ({ allowed: true, action: input.action, reason: "allow_explicit_grant", explanation: "Allowed by test grant." }));
     mockPauseGate.mockResolvedValue(null);
     mockIssueService.findMentionedAgents.mockResolvedValue([]);
@@ -267,6 +271,43 @@ describe("issue update comment wakeups", () => {
     mockIssueService.getWakeableParentAfterChildCompletion.mockResolvedValue(null);
     mockIssueService.getCurrentScheduledRetry.mockResolvedValue(null);
     mockIssueService.listReviewAttention.mockResolvedValue(new Map());
+  });
+
+  it.each(["queued", "scheduled_retry", "running"])("stops an unlinked %s run before an assignment-only update", async (status) => {
+    const existing = makeIssue({ assigneeAgentId: PREVIOUS_AGENT_ID, assigneeUserId: null, status: "blocked" });
+    const pending = { id: "pending-reassignment", companyId: existing.companyId,
+      agentId: PREVIOUS_AGENT_ID, nativeIssueId: existing.id, status, contextSnapshot: {} };
+    mockIssueService.getById.mockResolvedValue(existing);
+    let stopped = false;
+    mockHeartbeatService.getActiveRunForAgent.mockImplementation(async (_agentId, scope) =>
+      scope?.includePending && !stopped ? pending : null);
+    mockHeartbeatService.cancelRun.mockImplementation(async () => { stopped = true; return { ...pending, status: "cancelled" }; });
+    mockIssueService.update.mockImplementation(async () => {
+      expect(stopped).toBe(true);
+      return { ...existing, assigneeAgentId: ASSIGNEE_AGENT_ID };
+    });
+    const response = await request(await createApp()).patch(`/api/issues/${existing.id}`)
+      .send({ assigneeAgentId: ASSIGNEE_AGENT_ID, assigneeUserId: null, deferWakeForGoal: true });
+    expect(response.status).toBe(200);
+    expect(mockHeartbeatService.getActiveRunForAgent).toHaveBeenCalledWith(PREVIOUS_AGENT_ID,
+      expect.objectContaining({ companyId: existing.companyId, issueId: existing.id, includePending: true }));
+    expect(mockHeartbeatService.cancelRun).toHaveBeenCalledWith(pending.id, "Cancelled before issue reassignment",
+      expect.objectContaining({ errorCode: "issue_reassigned", suppressImmediateRecovery: true }));
+    expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
+  });
+
+  it("does not assign or wake the next owner when a pending retry cannot stop", async () => {
+    const existing = makeIssue({ assigneeAgentId: PREVIOUS_AGENT_ID, assigneeUserId: null });
+    const retry = { id: "retry-not-stopped", companyId: existing.companyId,
+      agentId: PREVIOUS_AGENT_ID, nativeIssueId: existing.id, status: "scheduled_retry" };
+    mockIssueService.getById.mockResolvedValue(existing);
+    mockHeartbeatService.getActiveRunForAgent.mockImplementation(async (_agentId, scope) => scope?.includePending ? retry : null);
+    mockHeartbeatService.cancelRun.mockResolvedValue(retry);
+    const response = await request(await createApp()).patch(`/api/issues/${existing.id}`)
+      .send({ assigneeAgentId: ASSIGNEE_AGENT_ID, assigneeUserId: null });
+    expect(response.status).toBe(409);
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+    expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
   });
 
   it.each(["post", "patch"] as const)("rejects %s board messages under an inherited pause before any mutation", async (method) => {

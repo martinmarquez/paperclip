@@ -13512,13 +13512,30 @@ export function issueRoutes(
           issueId: existing.id,
           agentId: existing.assigneeAgentId,
         });
-        const runToStopForReassignment = await resolveActiveIssueRun(existing);
-        if (runToStopForReassignment) {
+        let runToStopForReassignment = await resolveActiveIssueRun(existing);
+        const stoppedRunIds = new Set<string>();
+        while (true) {
+          runToStopForReassignment ??= await heartbeat.getActiveRunForAgent(existing.assigneeAgentId, {
+            companyId: existing.companyId, issueId: existing.id,
+            executionRunId: existing.executionRunId, includePending: true,
+          });
+          if (!runToStopForReassignment) break;
+          if (stoppedRunIds.has(runToStopForReassignment.id) || stoppedRunIds.size >= 100) {
+            throw conflict("Task execution changed during reassignment; refresh before retrying", {
+              code: "issue_reassignment_stop_unconfirmed", runId: runToStopForReassignment.id,
+            });
+          }
+          stoppedRunIds.add(runToStopForReassignment.id);
+          if (runToStopForReassignment.companyId !== existing.companyId ||
+              runToStopForReassignment.agentId !== existing.assigneeAgentId ||
+              (runToStopForReassignment.nativeIssueId && runToStopForReassignment.nativeIssueId !== existing.id)) {
+            throw conflict("Reassignment run binding changed");
+          }
           const cancelled = await heartbeat.cancelRun(
             runToStopForReassignment.id,
             "Cancelled before issue reassignment",
             {
-              errorCode: "issue_reassigned",
+              errorCode: "issue_reassigned", suppressImmediateRecovery: true,
               resultJson: { reassignmentStopConfirmed: true, issueMutationStopId },
               eventMessage: "run cancelled before issue reassignment",
               eventPayload: { issueId: existing.id },
@@ -13533,7 +13550,8 @@ export function issueRoutes(
               },
             );
           }
-          interruptedRunId = cancelled.id;
+          interruptedRunId ??= cancelled.id;
+          runToStopForReassignment = null;
         }
       }
 

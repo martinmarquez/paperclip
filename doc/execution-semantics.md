@@ -1652,3 +1652,27 @@ pings keep their coalescing behavior. Ordinary wake keys do not guarantee
 single delivery after promotion: do not blindly resend an ambiguous request.
 Confirm the persisted receipt through wake diagnostics; a deferred-looking
 response or the current execution ID alone does not prove a successor exists.
+
+
+### Reassignment and pending executions
+
+An assignment-only update must stop the previous owner's task runs in all three
+active states: `running`, `queued`, and `scheduled_retry`. The HTTP path and the
+native reassignment callback use the existing run cancellation lifecycle before
+changing the owner. They suppress immediate recovery of the stopped task. A failed
+Stop leaves ownership unchanged. Stops stay outside the assignment transaction so
+provider cleanup cannot deadlock on the task row.
+
+The issue service then locks the task row and refuses the assignment if another
+old-owner run remains or appeared during Stop. This fence also applies to service
+and plugin writes. It does not cancel another owner's run or unrelated task work.
+Native task identity takes precedence over legacy `issueId`/`taskId` and wake
+payload aliases. The execution pointer is a fallback only when the run has no task
+identity. Company and old-owner scope remain mandatory.
+
+Generic failure retries recheck ownership under the scheduler's task-row lock
+before insertion. This check retains the existing current-review-participant and
+non-assignee workspace-wait exceptions. It does not change retry budgets, account
+selection, pause gates or provider termination rules. A concurrent run that
+prevents the handoff produces a conflict for a fresh decision; the control plane
+does not force the ownership write.

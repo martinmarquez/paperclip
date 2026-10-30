@@ -1,3 +1,4 @@
+import { canonicalRunTaskId, taskRunBinding } from "./task-run-identity.js";
 import { retryIdempotentDatabaseOperation } from "../database-retry.js";
 import { prepareConnectionInstructionDelivery } from "./connection-instructions.js";
 import { resolveAssignedConnectionInstructionsForRun } from "./native-runtime/assigned-mcp-tools.js";
@@ -15518,7 +15519,12 @@ export function heartbeatService(
         : null;
     const transientRetryNotBefore = transientRecovery?.retryNotBefore ?? null;
     const contextSnapshot = parseObject(run.contextSnapshot);
-    const issueId = run.nativeIssueId ?? readNonEmptyString(contextSnapshot.issueId);
+    let issueId = run.nativeIssueId ?? readNonEmptyString(contextSnapshot.issueId) ?? readNonEmptyString(contextSnapshot.taskId);
+    if (!issueId && run.wakeupRequestId) {
+      const [binding] = await db.select({ issueId: canonicalRunTaskId }).from(heartbeatRuns)
+        .where(and(eq(heartbeatRuns.companyId, run.companyId), eq(heartbeatRuns.id, run.id)));
+      issueId = binding?.issueId ?? null;
+    }
 
     if (!baseSchedule) {
       const exhaustion = {
@@ -16023,6 +16029,20 @@ export function heartbeatService(
               details: { issueId, expectedExecutionRunId: run.id, currentExecutionRunId: lockedIssue?.executionRunId ?? null },
             };
           }
+        }
+
+        if (issueId && !isNonAssigneeWorkspaceBusyRetry(retryReason, contextSnapshot)) {
+          const [owner] = await tx.select({
+            assigneeAgentId: issues.assigneeAgentId, status: issues.status, executionState: issues.executionState,
+          }).from(issues).where(and(eq(issues.companyId, run.companyId), eq(issues.id, issueId)));
+          const review = owner?.status === "in_review" ? parseIssueExecutionState(owner.executionState) : null;
+          const isReviewer = review?.status === "pending" && review.currentParticipant?.type === "agent"
+            && review.currentParticipant.agentId === run.agentId;
+          if (owner && owner.assigneeAgentId !== run.agentId && !isReviewer) return {
+            outcome: "not_scheduled", issueId, errorCode: "issue_reassigned",
+            reason: "Scheduled retry suppressed because issue ownership changed",
+            details: { previousAssigneeAgentId: run.agentId, currentAssigneeAgentId: owner.assigneeAgentId },
+          };
         }
 
         const [lockedPredecessor] = await tx.select({ contextSnapshot: heartbeatRuns.contextSnapshot })
@@ -25071,17 +25091,26 @@ export function heartbeatService(
                       null,
                     stopTaskForReassignment: async (target) => {
                       await settleLiveRunnerGoalBeforeInterrupt(db, target);
-                      if (!target.runId) return;
-                      const prior = await getRun(target.runId);
-                      if (!prior || prior.companyId !== target.companyId || prior.agentId !== target.agentId) {
-                        throw conflict("Reassignment run binding changed");
+                      if (target.runId) {
+                        const prior = await getRun(target.runId);
+                        if (!prior || prior.companyId !== target.companyId || prior.agentId !== target.agentId) {
+                          throw conflict("Reassignment run binding changed");
+                        }
                       }
-                      const stopped = await cancelRunInternal(target.runId, "Cancelled for task reassignment", {
-                        errorCode: "issue_reassigned", suppressImmediateRecovery: true,
-                        resultJson: { reassignmentStopConfirmed: true },
-                      });
-                      if (stopped && ["running", "queued", "scheduled_retry"].includes(stopped.status)) {
-                        throw conflict("The previous run did not stop; reassignment was not applied");
+                      const pending = await db.select().from(heartbeatRuns).where(and(
+                        eq(heartbeatRuns.agentId, target.agentId),
+                        taskRunBinding({ ...target, executionRunId: target.runId }),
+                        inArray(heartbeatRuns.status, ["running", "queued", "scheduled_retry"]),
+                      )).orderBy(asc(heartbeatRuns.id)).limit(101);
+                      if (pending.length > 100) throw conflict("Too many pending task runs; inspect before reassignment");
+                      for (const prior of pending) {
+                        const stopped = await cancelRunInternal(prior.id, "Cancelled for task reassignment", {
+                          errorCode: "issue_reassigned", suppressImmediateRecovery: true,
+                          resultJson: { reassignmentStopConfirmed: true },
+                        });
+                        if (!stopped || ["running", "queued", "scheduled_retry"].includes(stopped.status)) {
+                          throw conflict("The previous run did not stop; reassignment was not applied");
+                        }
                       }
                     },
                     enqueueWakeup,
@@ -30708,17 +30737,22 @@ export function heartbeatService(
       return run ?? null;
     },
 
-    getActiveRunForAgent: async (agentId: string) => {
+    getActiveRunForAgent: async (agentId: string, task?: {
+      companyId: string; issueId: string; executionRunId?: string | null; includePending?: boolean;
+    }) => {
       const [run] = await db
         .select()
         .from(heartbeatRuns)
         .where(
           and(
             eq(heartbeatRuns.agentId, agentId),
-            eq(heartbeatRuns.status, "running"),
+            task?.includePending
+              ? inArray(heartbeatRuns.status, ["running", "queued", "scheduled_retry"])
+              : eq(heartbeatRuns.status, "running"),
+            task ? taskRunBinding(task) : undefined,
           ),
         )
-        .orderBy(desc(heartbeatRuns.startedAt))
+        .orderBy(desc(heartbeatRuns.startedAt), asc(heartbeatRuns.id))
         .limit(1);
       return run ?? null;
     },
