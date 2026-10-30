@@ -19,8 +19,8 @@ describePostgres("pending task runs at the ownership boundary", () => {
   }, 60_000);
   afterAll(async () => { await temporary?.cleanup(); });
 
-  async function fixture() {
-    const companyId = randomUUID(), agentId = randomUUID(), nextId = randomUUID(), issueId = randomUUID();
+  async function fixture(issueId = randomUUID()) {
+    const companyId = randomUUID(), agentId = randomUUID(), nextId = randomUUID();
     await db.insert(companies).values({ id: companyId, name: "Reassignment", issuePrefix: `R${companyId.slice(0, 6)}`,
       requireBoardApprovalForNewAgents: false, defaultResponsibleUserId: "test-board" });
     await db.insert(agents).values([agentId, nextId].map(id => ({ id, companyId, name: id,
@@ -40,6 +40,9 @@ describePostgres("pending task runs at the ownership boundary", () => {
     await db.insert(heartbeatRuns).values({ id, companyId: f.companyId, agentId: f.agentId, status,
       invocationSource: "automation", triggerDetail: "system", wakeupRequestId,
       nativeIssueId: identity === "native" ? f.issueId : null,
+      runtimeMode: identity === "native" ? "native" : "legacy",
+      // Failed legacy fixtures prove bootstrap stopped before provider work.
+      resultJson: status === "failed" ? { executionRecovery: { kind: "bootstrap", providerWorkStarted: false } } : null,
       contextSnapshot: identity === "issue" ? { issueId: f.issueId } : identity === "task" ? { taskId: f.issueId } : {} });
     return id;
   }
@@ -65,14 +68,48 @@ describePostgres("pending task runs at the ownership boundary", () => {
     const f = await fixture(), other = await fixture();
     const conflicted = await seed(f, "queued", "issue");
     await db.update(heartbeatRuns).set({ nativeIssueId: other.issueId }).where(eq(heartbeatRuns.id, conflicted));
+    await db.update(issues).set({ executionRunId: conflicted }).where(eq(issues.id, f.issueId));
     await seed(other, "scheduled_retry", "native");
     const nextRun = randomUUID();
     await db.insert(heartbeatRuns).values({ id: nextRun, companyId: f.companyId, agentId: f.nextId,
       nativeIssueId: f.issueId, status: "queued", invocationSource: "automation", triggerDetail: "system" });
-    expect(await f.heartbeat.getActiveRunForAgent(f.agentId, { companyId: f.companyId, issueId: f.issueId, includePending: true })).toBeNull();
+    expect(await f.heartbeat.getActiveRunForAgent(f.agentId, { companyId: f.companyId, issueId: f.issueId,
+      executionRunId: conflicted, includePending: true })).toBeNull();
     await issueService(db).update(f.issueId, { assigneeAgentId: f.nextId });
     expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, conflicted)))[0]?.status).toBe("queued");
     expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, nextRun)))[0]?.status).toBe("queued");
+  });
+
+  it("uses the execution pointer for an unscoped session key without treating that key as an issue", async () => {
+    const f = await fixture(), runId = await seed(f, "queued", "none");
+    await db.update(heartbeatRuns).set({ contextSnapshot: { taskId: "daily-summary-session" } }).where(eq(heartbeatRuns.id, runId));
+    await db.update(issues).set({ executionRunId: runId }).where(eq(issues.id, f.issueId));
+    expect(await f.heartbeat.getActiveRunForAgent(f.agentId, { companyId: f.companyId, issueId: f.issueId,
+      executionRunId: runId, includePending: true })).toMatchObject({ id: runId });
+    await expect(issueService(db).update(f.issueId, { assigneeAgentId: f.nextId })).rejects.toThrow();
+  });
+
+  it("recognizes UUIDv7 aliases with uppercase and surrounding whitespace", async () => {
+    const f = await fixture("019a8cdb-1234-7a12-8abc-0123456789ab");
+    const runId = await seed(f, "scheduled_retry", "task");
+    const alias = ` ${f.issueId.toUpperCase()} `;
+    await db.update(heartbeatRuns).set({ contextSnapshot: { taskId: alias } }).where(eq(heartbeatRuns.id, runId));
+    expect(await f.heartbeat.getActiveRunForAgent(f.agentId, { companyId: f.companyId,
+      issueId: f.issueId, includePending: true })).toMatchObject({ id: runId });
+    await expect(issueService(db).update(f.issueId, { assigneeAgentId: f.nextId })).rejects.toThrow();
+    const source = await seed(f, "failed", "task");
+    await db.update(heartbeatRuns).set({ contextSnapshot: { taskId: alias } }).where(eq(heartbeatRuns.id, source));
+    const retry = await f.heartbeat.scheduleBoundedRetry(source, { delayMs: 60_000 });
+    expect(retry).toMatchObject({ outcome: "scheduled" });
+    if (retry.outcome === "scheduled") expect(retry.run.contextSnapshot?.issueId).toBe(f.issueId.toUpperCase());
+  });
+
+  it("retains a non-UUID task-session key on an unscoped failure retry", async () => {
+    const f = await fixture(), runId = await seed(f, "failed", "none");
+    await db.update(heartbeatRuns).set({ contextSnapshot: { taskId: "daily-summary-session" } }).where(eq(heartbeatRuns.id, runId));
+    const retry = await f.heartbeat.scheduleBoundedRetry(runId, { delayMs: 60_000 });
+    expect(retry).toMatchObject({ outcome: "scheduled", run: { contextSnapshot: { taskId: "daily-summary-session" } } });
+    if (retry.outcome === "scheduled") expect(retry.run.contextSnapshot).not.toHaveProperty("issueId");
   });
 
   it("fences a retry that appears after the stop preflight while the task row is locked", async () => {

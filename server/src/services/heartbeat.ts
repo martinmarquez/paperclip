@@ -1,4 +1,4 @@
-import { canonicalRunTaskId, taskRunBinding } from "./task-run-identity.js";
+import { canonicalRunTaskId, isTaskUuid, taskRunBinding } from "./task-run-identity.js";
 import { retryIdempotentDatabaseOperation } from "../database-retry.js";
 import { prepareConnectionInstructionDelivery } from "./connection-instructions.js";
 import { resolveAssignedConnectionInstructionsForRun } from "./native-runtime/assigned-mcp-tools.js";
@@ -11231,7 +11231,7 @@ export function heartbeatService(
     const issueId =
       readNonEmptyString(contextSnapshot.issueId) ??
       readNonEmptyString(contextSnapshot.taskId);
-    const issueContext = issueId
+    const issueContext = issueId && isTaskUuid(issueId)
       ? await getIssueExecutionContext(run.companyId, issueId)
       : null;
     return resolveResponsibleUserIdForRun({
@@ -15519,11 +15519,13 @@ export function heartbeatService(
         : null;
     const transientRetryNotBefore = transientRecovery?.retryNotBefore ?? null;
     const contextSnapshot = parseObject(run.contextSnapshot);
-    let issueId = run.nativeIssueId ?? readNonEmptyString(contextSnapshot.issueId) ?? readNonEmptyString(contextSnapshot.taskId);
+    const taskAlias = readNonEmptyString(contextSnapshot.taskId);
+    let issueId = run.nativeIssueId ?? readNonEmptyString(contextSnapshot.issueId) ??
+      (isTaskUuid(taskAlias) ? taskAlias : null);
     if (!issueId && run.wakeupRequestId) {
       const [binding] = await db.select({ issueId: canonicalRunTaskId }).from(heartbeatRuns)
         .where(and(eq(heartbeatRuns.companyId, run.companyId), eq(heartbeatRuns.id, run.id)));
-      issueId = binding?.issueId ?? null;
+      issueId = isTaskUuid(binding?.issueId) ? binding!.issueId : null;
     }
 
     if (!baseSchedule) {

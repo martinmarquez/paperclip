@@ -1,13 +1,21 @@
-import { and, eq, or, sql } from "drizzle-orm";
+import { and, eq, or, sql, type SQL } from "drizzle-orm";
 import { agentWakeupRequests, heartbeatRuns } from "@paperclipai/db";
 
-// A native binding wins over compatibility aliases and wake payloads.
+const uuidPattern = "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$";
+const taskUuid = new RegExp(uuidPattern, "i");
+export function isTaskUuid(value: unknown): value is string {
+  return typeof value === "string" && taskUuid.test(value.trim());
+}
+const uuidAlias = (value: SQL) => sql`case when btrim(${value}) ~* ${uuidPattern} then lower(btrim(${value})) end`;
+
+// Session keys can also be named taskId; only UUID aliases bind an issue.
 export const canonicalRunTaskId = sql<string | null>`coalesce(
   ${heartbeatRuns.nativeIssueId}::text,
-  nullif(${heartbeatRuns.contextSnapshot}->>'issueId', ''),
-  nullif(${heartbeatRuns.contextSnapshot}->>'taskId', ''),
-  (select coalesce(w.payload->>'issueId', w.payload->>'taskId',
-    w.payload->'_paperclipWakeContext'->>'issueId', w.payload->'_paperclipWakeContext'->>'taskId')
+  ${uuidAlias(sql`${heartbeatRuns.contextSnapshot}->>'issueId'`)},
+  ${uuidAlias(sql`${heartbeatRuns.contextSnapshot}->>'taskId'`)},
+  (select coalesce(${uuidAlias(sql`w.payload->>'issueId'`)}, ${uuidAlias(sql`w.payload->>'taskId'`)},
+    ${uuidAlias(sql`w.payload->'_paperclipWakeContext'->>'issueId'`)},
+    ${uuidAlias(sql`w.payload->'_paperclipWakeContext'->>'taskId'`)})
    from ${agentWakeupRequests} w where w.id = ${heartbeatRuns.wakeupRequestId}
      and w.company_id = ${heartbeatRuns.companyId})
 )`;

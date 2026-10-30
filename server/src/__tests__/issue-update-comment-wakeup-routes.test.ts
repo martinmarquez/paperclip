@@ -256,6 +256,8 @@ describe("issue update comment wakeups", () => {
     vi.doUnmock("../middleware/index.js");
     registerModuleMocks();
     vi.clearAllMocks();
+    mockHeartbeatService.getRun.mockReset();
+    mockHeartbeatService.getRun.mockResolvedValue(null);
     mockHeartbeatService.cancelRun.mockReset();
     mockHeartbeatService.cancelRun.mockResolvedValue(null);
     mockHeartbeatService.getActiveRunForAgent.mockReset();
@@ -266,7 +268,7 @@ describe("issue update comment wakeups", () => {
     mockIssueService.getByIdentifier.mockResolvedValue(null);
     mockIssueService.getByIdForUpdate.mockImplementation(async () => mockIssueService.getById());
     mockIssueService.getRelationSummaries.mockResolvedValue({ blockedBy: [], blocks: [] });
-    mockIssueService.getDependencyReadiness.mockResolvedValue({ unresolvedBlockerCount: 1 });
+    mockIssueService.getDependencyReadiness.mockResolvedValue({ unresolvedBlockerCount: 1, blockerIssueIds: ["unresolved-blocker"], isDependencyReady: false });
     mockIssueService.listWakeableBlockedDependents.mockResolvedValue([]);
     mockIssueService.getWakeableParentAfterChildCompletion.mockResolvedValue(null);
     mockIssueService.getCurrentScheduledRetry.mockResolvedValue(null);
@@ -307,6 +309,22 @@ describe("issue update comment wakeups", () => {
       .send({ assigneeAgentId: ASSIGNEE_AGENT_ID, assigneeUserId: null });
     expect(response.status).toBe(409);
     expect(mockIssueService.update).not.toHaveBeenCalled();
+    expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
+  });
+
+  it("ignores a stale pointer to a different native task instead of cancelling or blocking that run", async () => {
+    const existing = makeIssue({ assigneeAgentId: PREVIOUS_AGENT_ID, assigneeUserId: null,
+      executionRunId: "other-task-run", status: "blocked" });
+    mockIssueService.getById.mockResolvedValue(existing);
+    mockHeartbeatService.getRun.mockResolvedValue({ id: "other-task-run", companyId: existing.companyId,
+      agentId: PREVIOUS_AGENT_ID, nativeIssueId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", status: "running" });
+    mockIssueService.update.mockResolvedValue({ ...existing, assigneeAgentId: ASSIGNEE_AGENT_ID });
+    const response = await request(await createApp()).patch(`/api/issues/${existing.id}`)
+      .send({ assigneeAgentId: ASSIGNEE_AGENT_ID, assigneeUserId: null, deferWakeForGoal: true });
+    expect(response.status).toBe(200);
+    expect(mockHeartbeatService.getActiveRunForAgent).toHaveBeenCalledWith(PREVIOUS_AGENT_ID,
+      expect.objectContaining({ issueId: existing.id, includePending: true }));
+    expect(mockHeartbeatService.cancelRun).not.toHaveBeenCalled();
     expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
   });
 

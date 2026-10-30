@@ -1666,8 +1666,8 @@ provider cleanup cannot deadlock on the task row.
 The issue service then locks the task row and refuses the assignment if another
 old-owner run remains or appeared during Stop. This fence also applies to service
 and plugin writes. It does not cancel another owner's run or unrelated task work.
-Native task identity takes precedence over legacy `issueId`/`taskId` and wake
-payload aliases. The execution pointer is a fallback only when the run has no task
+Native task identity takes precedence over UUID aliases in legacy `issueId`/`taskId`
+and wake payloads. Non-UUID session keys do not become task bindings. The execution pointer is a fallback only when the run has no task
 identity. Company and old-owner scope remain mandatory.
 
 Generic failure retries recheck ownership under the scheduler's task-row lock

@@ -191,24 +191,29 @@ const support = await getEmbeddedPostgresTestSupport();
     expect(await resolve(f, issue, a.run.id)).not.toHaveProperty("humanDirectedIssueId");
   });
 
-  it("revokes direction in service/plugin assignment transactions even while the old run remains running", async () => {
+  it("revokes direction atomically with reassignment and rejects a stale resumed run", async () => {
     const f = await seed(); const issue = await task(f); const first = await execution(f, issue, { human: true });
     let release!: () => void; let ready!: () => void;
     const held = new Promise<void>((resolve) => { release = resolve; });
     const changed = new Promise<void>((resolve) => { ready = resolve; });
     const reassignment = db.transaction(async (tx) => {
+      // Synthetic Stop and reassignment stay uncommitted so outside reads still
+      // see the prior running execution until the ownership transaction commits.
+      await tx.update(heartbeatRuns).set({ status: "cancelled" }).where(eq(heartbeatRuns.id, first.run.id));
       await issueService(db).update(issue.id, { assigneeAgentId: f.other.id }, tx);
       ready(); await held;
     });
     try {
       await Promise.race([changed, reassignment]);
       // With the reassignment deliberately held open, reads see the old committed
-      // assignment and live run together. After commit the wake is revoked even
-      // without route-level cancellation of the run.
+      // assignment and live run together. After commit the wake is revoked in
+      // the same transaction as the ownership change.
       expect(await resolve(f, issue, first.run.id)).toHaveProperty("humanDirectedIssueId", issue.id);
     } finally { release(); await reassignment; }
     expect(await resolve(f, issue, first.run.id)).not.toHaveProperty("humanDirectedIssueId");
     await issueService(db).update(issue.id, { assigneeAgentId: f.agent.id });
+    // A stale provider's synthetic late claim cannot restore the revoked wake.
+    await db.update(heartbeatRuns).set({ status: "running" }).where(eq(heartbeatRuns.id, first.run.id));
     expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, first.run.id)))[0].status).toBe("running");
     expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, first.wake.id)))[0].status).toBe("cancelled");
     expect(await resolve(f, issue, first.run.id)).not.toHaveProperty("humanDirectedIssueId");
@@ -222,8 +227,11 @@ const support = await getEmbeddedPostgresTestSupport();
 
   it("a late watchdog success cannot restore a request revoked by reassignment", async () => {
     const f = await seed(); const issue = await task(f); const first = await execution(f, issue, { human: true });
+    await db.update(heartbeatRuns).set({ status: "cancelled" }).where(eq(heartbeatRuns.id, first.run.id));
     await issueService(db).update(issue.id, { assigneeAgentId: f.other.id });
     const completed = (await issueService(db).update(issue.id, { assigneeAgentId: f.agent.id, status: "done" }))!;
+    // Replay a late provider/watchdog claim after the confirmed Stop and handoff.
+    await db.update(heartbeatRuns).set({ status: "running" }).where(eq(heartbeatRuns.id, first.run.id));
     const watchdog = createPostgresWatchdogAdapter(db);
     expect(await watchdog.foldSourceResolvedRun(f.companyId, {
       run: { ...first.run, sourceIssueId: issue.id },
@@ -245,8 +253,10 @@ const support = await getEmbeddedPostgresTestSupport();
     await retainBacklogHumanAssignment(db, issue, { actorType: "user", actorId: "owner" });
     const promoted = (await issueService(db).update(issue.id, { status: "todo" }))!;
     expect(await resolve(f, promoted, automatic.run.id)).toHaveProperty("humanDirectedIssueId", issue.id);
+    await db.update(heartbeatRuns).set({ status: "cancelled" }).where(eq(heartbeatRuns.id, automatic.run.id));
     await issueService(db).update(issue.id, { assigneeAgentId: f.other.id });
     await issueService(db).update(issue.id, { assigneeAgentId: f.agent.id, status: "backlog" });
+    await db.update(heartbeatRuns).set({ status: "running" }).where(eq(heartbeatRuns.id, automatic.run.id));
     // A delayed callback holding the original issue snapshot cannot regrant.
     await retainBacklogHumanAssignment(db, issue, { actorType: "user", actorId: "owner" });
     expect(await resolve(f, issue, automatic.run.id)).not.toHaveProperty("humanDirectedIssueId");

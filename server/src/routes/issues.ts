@@ -13512,10 +13512,9 @@ export function issueRoutes(
           issueId: existing.id,
           agentId: existing.assigneeAgentId,
         });
-        let runToStopForReassignment = await resolveActiveIssueRun(existing);
         const stoppedRunIds = new Set<string>();
         while (true) {
-          runToStopForReassignment ??= await heartbeat.getActiveRunForAgent(existing.assigneeAgentId, {
+          const runToStopForReassignment = await heartbeat.getActiveRunForAgent(existing.assigneeAgentId, {
             companyId: existing.companyId, issueId: existing.id,
             executionRunId: existing.executionRunId, includePending: true,
           });
@@ -13551,7 +13550,6 @@ export function issueRoutes(
             );
           }
           interruptedRunId ??= cancelled.id;
-          runToStopForReassignment = null;
         }
       }
 
