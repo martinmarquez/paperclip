@@ -266,6 +266,7 @@ import {
   reconcileRetainedNativeSessionCleanup,
   reconcileRetainedNativeSessionCleanups,
   resolveHeartbeatNativeRuntimeMode,
+  preserveReadOnlyReviewConfig,
 } from "./native-runtime/index.js";
 import {
   assertAgentCoreProfileRecoveryBinding,
@@ -21850,14 +21851,14 @@ export function heartbeatService(
         legacyUseProjectWorkspace:
           issueAssigneeOverrides?.useProjectWorkspace ?? null,
       });
-      const mergedConfig = {
+      const mergedConfig = preserveReadOnlyReviewConfig(parseObject(agent.adapterConfig), {
         ...workspaceManagedConfig,
         ...Object.fromEntries(Object.entries(issueAssigneeOverrides?.adapterConfig ?? {}).filter(([key]) => requestedAiBinding?.mode !== "router" || !["provider", "acpxAgent", "model", "modelReasoningEffort", "reasoningEffort", "effort", "variant"].includes(key))),
         ...(requestedAiBinding?.mode === "router" ? parseObject(parseObject(context.aiRouterSelection).runtimeConfig) : {}),
         // The base below is already task-owned. Keep directory transport while
         // preserving isolated mode and the mandatory sandbox preflight.
         ...(useIsolatedTaskDirectory ? { workspaceStrategy: { type: "project_primary" } } : {}),
-      };
+      });
       const configSnapshot = buildExecutionWorkspaceConfigSnapshot(
         mergedConfig,
         selectedEnvironmentId,

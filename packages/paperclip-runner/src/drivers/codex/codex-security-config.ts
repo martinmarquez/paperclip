@@ -113,6 +113,17 @@ const SKILLLESS_BASE_CONFIG = {
   "features.image_generation": false,
 } as const;
 
+const READ_ONLY_REVIEW_CONFIG = {
+  web_search: "disabled",
+  "features.browser_use": false,
+  "features.browser_use_external": false,
+  "features.browser_use_full_cdp_access": false,
+  "features.in_app_browser": false,
+  "features.code_mode": false,
+  "features.code_mode_only": false,
+  "features.remote_plugin": false,
+} as const;
+
 export function codexCommandEnvironment(
   source: NodeJS.ProcessEnv = process.env,
 ): Record<string, string> {
@@ -264,6 +275,7 @@ export function createIsolatedCodexAppServerArgs(
     ...(commandEnv.length > 0
       ? ["-c", `shell_environment_policy.set={${commandEnv}}`]
       : []),
+    ...(readOnlyReview ? Object.entries(READ_ONLY_REVIEW_CONFIG).flatMap(([key, value]) => ["-c", `${key}=${JSON.stringify(value)}`]) : []),
     "--disable",
     "image_generation",
     ...(externalRunnerSandbox
@@ -288,10 +300,10 @@ export function createSecuredCodexThreadParams(
       : CODEX_SKILLLESS_PERMISSION_PROFILE;
   return {
     cwd: workingDirectory,
-    config: collaborationThreadConfig(
-      includeCollaborationModeInstructions,
-      includeSkillInstructions,
-    ),
+    config: {
+      ...collaborationThreadConfig(includeCollaborationModeInstructions, includeSkillInstructions),
+      ...(source.PAPERCLIP_RUNNER_READ_ONLY === "1" ? READ_ONLY_REVIEW_CONFIG : {}),
+    },
     permissions: permissionProfile,
     runtimeWorkspaceRoots: [workingDirectory],
   };

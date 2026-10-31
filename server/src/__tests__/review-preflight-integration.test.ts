@@ -35,6 +35,11 @@ describe("native preflight integration", () => {
     }
   });
 
+  it("preserves an absent static cwd when native execution resolves its workspace per run", () => {
+    expect(projectBoardSource("configuration", { adapterType: "codex_local", adapterConfig: {} }, scope))
+      .toEqual({ adapterType: "codex_local", cwd: null, sandbox: "configured" });
+  });
+
   it("drops key material and filters audit records to both reviewers", () => {
     const keys = projectBoardSource("keys", [{ id: "id", scopeConfig: { kind: "standard", token: "secret" },
       createdAt: "2026-10-30T00:00:00Z", revokedAt: null, keyHash: "secret" }], scope);

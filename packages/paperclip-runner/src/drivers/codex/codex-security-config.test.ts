@@ -33,8 +33,14 @@ describe("Codex security configuration", () => {
     expect(args).not.toContain("dangerously-bypass");
     expect(args).not.toContain("GH_TOKEN");
     expect(args).not.toContain("secret");
-    expect(createSecuredCodexThreadParams("/repo", "default", true, false, source).permissions)
-      .toBe("paperclip-runner-workspace-read-only");
+    expect(args).toContain("features.browser_use=false");
+    expect(args).toContain('web_search="disabled"');
+    expect(createSecuredCodexThreadParams("/repo", "default", true, false, source)).toMatchObject({
+      permissions: "paperclip-runner-workspace-read-only",
+      config: { web_search: "disabled", "features.browser_use": false, "features.browser_use_external": false,
+        "features.browser_use_full_cdp_access": false, "features.in_app_browser": false,
+        "features.code_mode": false, "features.code_mode_only": false, "features.remote_plugin": false },
+    });
     for (const scratch of [undefined, "/", "relative"]) {
       expect(() => createIsolatedCodexAppServerArgs({ ...source, PAPERCLIP_RUNNER_READ_ONLY_SCRATCH: scratch }))
         .toThrow("scratch_required");

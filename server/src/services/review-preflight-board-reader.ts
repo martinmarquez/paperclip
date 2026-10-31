@@ -45,7 +45,7 @@ export function projectBoardSource(kind: SourceKind, raw: unknown, scope: Bridge
   const value = object(raw);
   if (kind === "configuration") {
     const config = object(value.adapterConfig);
-    return { adapterType: text(value.adapterType), cwd: text(config.cwd),
+    return { adapterType: text(value.adapterType), cwd: config.cwd == null ? null : text(config.cwd),
       sandbox: config.dangerouslyBypassApprovalsAndSandbox === true ? "bypass" : "configured" };
   }
   if (kind === "keys") return array(raw).map((item) => {

@@ -48,7 +48,7 @@ const keySchema = z.object({
   revokedAt: z.string().datetime({ offset: true }).nullable(),
 });
 const sourceSchema = z.object({
-  configuration: z.object({ adapterType: z.string().max(100), cwd: z.string().max(500), sandbox: z.string().max(100) }),
+  configuration: z.object({ adapterType: z.string().max(100), cwd: z.string().max(500).nullable(), sandbox: z.string().max(100) }),
   keys: z.array(keySchema).max(50),
   profile: z.object({ profileNames: z.array(z.string().max(100)).max(50), bindingNames: z.array(z.string().max(100)).max(50) }),
   environment: z.object({ names: z.array(z.string().max(100)).max(50), drivers: z.array(z.string().max(100)).max(50) }),

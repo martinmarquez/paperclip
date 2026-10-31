@@ -80,11 +80,13 @@ expires observations after 15 minutes. Missing evidence remains UNKNOWN.
 ## Native review isolation
 
 For the two admitted reviewers only, an operator can set adapter config
-`reviewReadOnly: true`. The controller overrides the environment flag after
-adapter environment merge. Local native Codex then gets a fresh process, a
+`reviewReadOnly: true`. The controller preserves the stored role boundary across task/router overrides
+and overrides the environment flag after adapter environment merge. Local native Codex then gets a fresh process, a
 per-turn lifecycle, read-only source and Git metadata, and a unique owner-only
 scratch directory. Existing warm sessions must close before the new session can
-start. Shell network and inherited GitHub credentials are denied. Provider
+start. Shell network, browser use, web search, code mode and remote plugins are disabled
+for this option at process startup and thread configuration. Inherited GitHub
+credentials are denied. Provider
 credentials remain outside the command sandbox. The provider must acknowledge
 `paperclip-runner-workspace-read-only` before a turn can start. Legacy ACP/CLI,
 remote execution and runnerd fallback are rejected for this option.

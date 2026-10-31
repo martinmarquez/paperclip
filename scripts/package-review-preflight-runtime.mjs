@@ -11,7 +11,7 @@ const sourceSha = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" 
 assert.equal(sourceSha, process.env.PAPERCLIP_CANDIDATE_SHA);
 const groups = [
   ["server", "@paperclipai/server", ["app", "index", "routes/openapi", "routes/review-preflight-bridge", "routes/review-preflight-operator-page", "services/heartbeat",
-    "services/native-runtime/native-session-executor", "services/review-preflight-bridge", "services/review-preflight-sql-store",
+    "services/native-runtime/native-session-executor", "services/native-runtime/runtime-mode", "services/review-preflight-bridge", "services/review-preflight-sql-store",
     "services/review-preflight-authority", "services/review-preflight-board-reader", "services/review-preflight-integration"]],
   ["packages/db", "@paperclipai/db", ["index", "review-preflight-sql", "schema/index", "schema/review_preflight"]],
   ["packages/shared", "@paperclipai/shared", ["constants"]],
@@ -24,7 +24,7 @@ for (const [sourceRoot, targetPackage, modules] of groups) for (const module of 
   const source = await readFile(sourcePath, "utf8");
   const output = ts.transpileModule(source, { fileName: sourcePath, reportDiagnostics: true,
     compilerOptions: { target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.ESNext, esModuleInterop: true, isolatedModules: true } });
-  assert.equal(output.diagnostics?.filter(item => item.category === ts.DiagnosticCategory.Error).length, 0, sourcePath);
+  assert.equal(output.diagnostics?.filter(item => item.category === ts.DiagnosticCategory.Error).length ?? 0, 0, sourcePath);
   const target = targetPackage.includes("/vendor/") ? `node_modules/${targetPackage}/${module}.js` : `node_modules/${targetPackage}/dist/${module}.js`;
   files.push({ file: target, content: output.outputText, sha256: sha256(output.outputText), sourcePath, sourceHash: sha256(source) });
 }

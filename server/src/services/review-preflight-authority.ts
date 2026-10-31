@@ -13,7 +13,7 @@ async function allowed(tx: PreflightSqlExecutor, principal: Principal, permissio
         ON m.company_id = g.company_id AND m.principal_type = g.principal_type AND m.principal_id = g.principal_id
       WHERE g.company_id = $1 AND g.principal_type = $2 AND g.principal_id = $3
         AND g.permission_key = $4 AND m.status = 'active'
-        AND ($2 <> 'user' OR m.membership_role IN ('owner','admin','member'))
+        AND ($2 <> 'user' OR m.membership_role IN ('owner','admin','operator','member'))
       FOR SHARE OF g, m`, [companyId, principal.type === "board" ? "user" : "agent", principal.id, permission], signal);
   const row = rows.rows[0];
   const scope = row?.scope;

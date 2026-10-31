@@ -64,6 +64,12 @@ try {
     const board = { type: "board", id: "board", source: "session" };
     assert.equal(await nativeAuthority.can(board, "review-preflight:run", companyId), true);
     assert.equal(await nativeAuthority.can(board, "review-preflight:run", otherCompanyId), false);
+    await sql`UPDATE company_memberships SET membership_role = 'operator' WHERE principal_id = 'board'`;
+    assert.equal(await nativeAuthority.can(board, "review-preflight:run", companyId), true, "native operator role supports an explicit run grant");
+    await sql`UPDATE company_memberships SET membership_role = 'viewer' WHERE principal_id = 'board'`;
+    assert.equal(await nativeAuthority.can(board, "review-preflight:run", companyId), false, "viewer membership cannot publish even with a grant");
+    await sql`UPDATE company_memberships SET membership_role = 'owner' WHERE principal_id = 'board'`;
+
     let acquired, release;
     const ready = new Promise(resolve => { acquired = resolve; });
     const hold = new Promise(resolve => { release = resolve; });
@@ -71,18 +77,26 @@ try {
       assert.equal(await nativeAuthority.publicationAuthority(tx, { actorId: "board", companyId }, new AbortController().signal), true);
       acquired();
       await hold;
-    }, { signal: new AbortController().signal, timeoutMs: 3_000 });
-    await ready;
+    }, { signal: new AbortController().signal, timeoutMs: 3_000 }).then(() => null, error => error);
+    const earlyFailure = await Promise.race([ready.then(() => null), publication]);
+    if (earlyFailure) throw earlyFailure;
     const revocation = Promise.resolve(sql`DELETE FROM principal_permission_grants WHERE principal_id = 'board'`);
     try {
       let blocked = false;
       for (let attempt = 0; attempt < 60; attempt++) {
-        const probe = await db.query("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE 'DELETE FROM principal_permission_grants%') AS blocked");
+        // The main connection is executing the blocked DELETE; observe on a separate native connection.
+        const probe = await db.transaction(tx => tx.query("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE 'DELETE FROM principal_permission_grants%') AS blocked"),
+          { signal: new AbortController().signal, timeoutMs: 1_000 });
         if (probe.rows[0].blocked) { blocked = true; break; }
         await new Promise(resolve => setTimeout(resolve, 20));
       }
       assert.equal(blocked, true, "native revocation waits for the publication's native ACL lock");
-    } finally { release(); await publication; await revocation; }
+    } finally {
+      release();
+      const publicationFailure = await publication;
+      await revocation;
+      if (publicationFailure) throw publicationFailure;
+    }
     assert.equal(await nativeAuthority.can(board, "review-preflight:run", companyId), false, "revocation applies before the next publication");
     process.stdout.write("native authority: exact subject, company and transactional revocation passed\n");
     const sampleAt = new Date("2026-10-30T12:00:00.000Z");
