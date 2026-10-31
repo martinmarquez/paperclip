@@ -2638,6 +2638,17 @@ const execution = {
   credentialBindings: [],
 } as NativeExecutionInputV1;
 
+describe("native read-only review backend admission", () => {
+  it.each([true, false])("denies unsupported execution before provider work (runnerd=%s)", async (useRunnerd) => {
+    const selected = useRunnerd ? execution : { ...execution, provider: { kind: "opencode", model: null } } as NativeExecutionInputV1;
+    const before = state.execute.mock.calls.length;
+    await expect(executePaperclipNativeSession({ db: leaseDb(selected), execution: selected, runnerInstanceId: "review",
+      useRunnerd, runnerEnvironment: { PAPERCLIP_RUNNER_READ_ONLY: "1" } }))
+      .rejects.toThrow("review_read_only_requires_local_native_codex");
+    expect(state.execute.mock.calls.length).toBe(before);
+  });
+});
+
 describe("retained native cleanup activation", () => {
   it.each([
     "settled",

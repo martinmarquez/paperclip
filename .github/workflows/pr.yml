@@ -48,4 +48,16 @@ jobs:
           test -x "$pg_bindir/pg_ctl"
           echo "$pg_bindir" >> "$GITHUB_PATH"
       - name: Verify store API, processes, restart and JSON evidence
-        run: bash scripts/test-review-preflight-sql-store-pg.sh
+        run: |
+          pnpm --filter @paperclipai/db exec tsx src/review-preflight-schema-check.mjs
+          bash scripts/test-review-preflight-sql-store-pg.sh
+      - name: Package the reviewed maintenance runtime candidate
+        env:
+          PAPERCLIP_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha }}
+        run: node scripts/package-review-preflight-runtime.mjs
+      - uses: actions/upload-artifact@v6
+        with:
+          name: review-preflight-runtime-${{ github.event.pull_request.head.sha }}
+          path: runtime-candidate/review-preflight-runtime.json.gz
+          retention-days: 1
+          if-no-files-found: error

@@ -42,6 +42,7 @@ import {
   openSync,
   opendirSync,
   readFileSync,
+  realpathSync,
   readdirSync,
   readlinkSync,
   readSync,
@@ -7295,6 +7296,12 @@ export async function executePaperclipNativeSession(input: {
   ) => Promise<unknown>;
 }): Promise<AdapterExecutionResult> {
   const runId = input.execution.binding.runId;
+  const readOnlyReview = input.runnerEnvironment?.PAPERCLIP_RUNNER_READ_ONLY === "1";
+  if (readOnlyReview) {
+    if (input.execution.provider.kind !== "codex" || input.useRunnerd || input.runnerExecutionTarget?.kind === "remote") {
+      throw new Error("review_read_only_requires_local_native_codex");
+    }
+  }
   if (nativeSessionStartups.has(runId)) {
     throw new Error("native_session_supervisor_busy");
   }
@@ -7323,8 +7330,18 @@ export async function executePaperclipNativeSession(input: {
     }
     executingNativeOwnerScopes.set(ownerScope, ownerToken);
     await retireSupersededWarmNativeSessions(
-      ownerScope, nativeSessionScopeKey(input.execution),
+      ownerScope, readOnlyReview ? "read-only:fresh-process-required" : nativeSessionScopeKey(input.execution),
     );
+    if (readOnlyReview) {
+      const scratchParent = resolve(resolvePaperclipInstanceRoot(), "runtime", "read-only-review-scratch");
+      mkdirSync(scratchParent, { recursive: true, mode: 0o700 });
+      const scratch = realpathSync(mkdtempSync(resolve(scratchParent, `${createHash("sha256").update(runId).digest("hex").slice(0, 16)}-`)));
+      // Retained under the instance's file-retention hold. No shared /tmp write root.
+      input = { ...input, refreshTools: true,
+        execution: { ...input.execution, session: { ...input.execution.session, lifecyclePolicy: { mode: "per_turn", idleTimeoutMs: null } } },
+        runnerEnvironment: { ...input.runnerEnvironment, PAPERCLIP_RUNNER_READ_ONLY_SCRATCH: scratch },
+      };
+    }
     if (!input.useRunnerd) {
       return await executePaperclipNativeSessionWithinScope(input);
     }
@@ -8359,6 +8376,7 @@ async function executePaperclipNativeSessionWithinScope(
               input.backend ??
               runnerdBackend ??
               createNativeSessionBackend(input.execution, {
+                environment: resolveNativeProviderEnvironment(input.execution.provider, input.runnerEnvironment),
                 runnerInstanceId: input.runnerInstanceId,
                 onSpawn: input.onSpawn,
                 opencodeEnvironment: resolveNativeProviderEnvironment(input.execution.provider, input.runnerEnvironment),

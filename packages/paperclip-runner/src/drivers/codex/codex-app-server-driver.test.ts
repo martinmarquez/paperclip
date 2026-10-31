@@ -164,7 +164,8 @@ class FakeCodexTransport implements CodexAppServerTransport {
         model: "gpt-test",
         modelProvider: "openai",
         cwd: TEST_WORKING_DIRECTORY,
-        sandbox: { type: "workspaceWrite" },
+        activePermissionProfile: { id: params.permissions },
+        sandbox: { type: "workspaceWrite", networkAccess: false, excludeTmpdirEnvVar: true, excludeSlashTmp: true, writableRoots: ["/private/review/scratch"] },
         approvalPolicy: params.approvalPolicy,
         instructionSources: [],
       };
@@ -491,6 +492,43 @@ describe("Codex app-server Codex driver", () => {
       "-old",
       "+new",
     ].join("\n"))).toEqual([]);
+  });
+
+  it.each([false, true])("checks the canonical provider profile and scratch-only sandbox before native review (unsafe=%s)", async (unsafe) => {
+    const transport = new FakeCodexTransport();
+    const request = transport.request.bind(transport);
+    transport.request = async (method, params) => {
+      const result = await request(method, params);
+      if (method === "thread/start") {
+        // The real provider returns the acknowledgement next to thread, not inside it.
+        delete (result.thread as Record<string, unknown>).activePermissionProfile;
+        if (unsafe) (result.sandbox as Record<string, unknown>).writableRoots = [TEST_WORKING_DIRECTORY];
+      }
+      return result;
+    };
+    const driver = makeDriver([transport], { environment: { PAPERCLIP_RUNNER_READ_ONLY: "1", PAPERCLIP_RUNNER_READ_ONLY_SCRATCH: "/private/review/scratch" } });
+    const opening = driver.openSession({ runId: "canonical-review", normalizedSessionId: "canonical-review", workingDirectory: TEST_WORKING_DIRECTORY });
+    if (unsafe) await expect(opening).rejects.toThrow("native read-only sandbox");
+    else await expect(opening).resolves.toBeDefined();
+    expect(transport.calls.some(call => call.method === "turn/start")).toBe(false);
+  });
+
+  it.each([null, "paperclip-runner-workspace-only"])("denies native read-only review without the exact provider acknowledgement: %s", async (profile) => {
+    const transport = new FakeCodexTransport();
+    const request = transport.request.bind(transport);
+    transport.request = async (method, params) => {
+      const result = await request(method, params);
+      if (method === "thread/start") {
+        result.activePermissionProfile = profile ? { id: profile } : undefined;
+        const thread = result.thread as Record<string, unknown>;
+        thread.activePermissionProfile = undefined;
+      }
+      return result;
+    };
+    const driver = makeDriver([transport], { environment: { PAPERCLIP_RUNNER_READ_ONLY: "1", PAPERCLIP_RUNNER_READ_ONLY_SCRATCH: "/private/review/scratch" } });
+    await expect(driver.openSession({ runId: "read-only", normalizedSessionId: "read-only", workingDirectory: TEST_WORKING_DIRECTORY }))
+      .rejects.toThrow(/native read-only sandbox|required filesystem permission profile/);
+    expect(transport.calls.some(call => call.method === "turn/start")).toBe(false);
   });
 
   it("persists process ownership before sending provider requests", async () => {

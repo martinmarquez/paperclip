@@ -1,7 +1,7 @@
 import { boundedOperation, evidenceFresh, hashEvidence, type Evidence, type Reservation, type ReservationStore, type ReserveResult, type Subject } from "./review-preflight-bridge.js";
 import type { PreflightSqlDatabase, PreflightSqlExecutor } from "@paperclipai/db";
 
-// Offline adapter contract. The SQL migration is intentionally not registered or applied.
+// Native adapter. Schema changes use the registered migration path, never a query-side bootstrap.
 export type SqlExecutor = PreflightSqlExecutor;
 export type SqlDatabase = PreflightSqlDatabase;
 

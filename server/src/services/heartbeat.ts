@@ -25050,6 +25050,7 @@ export function heartbeatService(
                         process.env,
                         executionWorkspace.cwd,
                       ),
+                      PAPERCLIP_RUNNER_READ_ONLY: runtimeConfig.reviewReadOnly === true ? "1" : "0",
                       ...(instructionCopy && isAgentDirectoryCopy(instructionCopy) ? { AGENT_HOME: instructionCopy.executionRoot } : {}),
                       ...(nativeMcpServer
                         ? {

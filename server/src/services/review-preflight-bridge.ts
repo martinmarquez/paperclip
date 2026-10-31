@@ -11,7 +11,7 @@ export type BridgeScope = {
   operatorUserIds: readonly string[];
 };
 
-const scopeSchema = z.strictObject({
+export const scopeSchema = z.strictObject({
   companyId: z.uuid(), prNumber: z.number().int().positive(),
   reviewerIds: z.tuple([z.uuid(), z.uuid()]),
   readerAgentIds: z.tuple([z.uuid(), z.uuid()]),
@@ -118,7 +118,8 @@ export interface BridgeDependencies {
   scope: BridgeScope;
   subject: Subject | null; // Resolved from the protected integration owner, never from POST body.
   store: ReservationStore;
-  reader?: BoardHostReader; // No production adapter is included in this patch.
+  reader?: BoardHostReader;
+  readerForSession?: (cookie: string) => BoardHostReader;
   can: (principal: Principal, permission: "review-preflight:run" | "review-preflight:evidence-read", companyId: string, requestId?: string, signal?: AbortSignal) => Promise<boolean>;
   verifyOrigin: (origin: string | undefined) => boolean;
   now?: () => Date;
@@ -146,7 +147,7 @@ export type Evidence = {
 
 const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
 
-function canonicalJson(value: unknown): string {
+export function canonicalJson(value: unknown): string {
   if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null";
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
   const entries = Object.entries(value)

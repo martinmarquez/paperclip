@@ -569,6 +569,7 @@ export async function ensureCodexSkillsInjected(
 }
 
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
+  if (ctx.config.reviewReadOnly === true) throw new Error("reviewReadOnly requires the local native Codex runtime; legacy fallback is denied");
   const providerStop = createProviderStoppedBoundary(ctx.onProviderStopped);
   const engineSelection = await resolveCodexExecutionEngineForRun(ctx);
   if (engineSelection.unavailableReason) {

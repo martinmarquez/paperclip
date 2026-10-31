@@ -6,6 +6,7 @@ import { realpathSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { createReviewPreflightSqlDatabase } from "./review-preflight-sql.ts";
 import { ReviewPreflightSqlStore } from "../../../server/src/services/review-preflight-sql-store.ts";
+import { createNativePreflightAuthority } from "../../../server/src/services/review-preflight-authority.ts";
 import { hashEvidence } from "../../../server/src/services/review-preflight-bridge.ts";
 
 const companyId = "00000000-0000-4000-8000-000000000010";
@@ -53,6 +54,37 @@ try {
     const result = await store.reserve(input(process.argv[3]));
     process.stdout.write(JSON.stringify({ workerPid: process.pid, kind: result.kind, id: "reservation" in result ? result.reservation.id : null }) + "\n");
   } else if (mode === "verify") {
+    // Native ACL rows are isolated fixtures, with the same columns and lock targets as the instance.
+    await sql`CREATE TABLE company_memberships (company_id uuid, principal_type text, principal_id text, status text, membership_role text)`;
+    await sql`CREATE TABLE principal_permission_grants (company_id uuid, principal_type text, principal_id text, permission_key text, scope jsonb)`;
+    await sql`INSERT INTO company_memberships VALUES (${companyId}, 'user', 'board', 'active', 'owner')`;
+    const grant = { companyId, subjectSha: subject.sha, expiresAt: new Date(Date.now() + 600_000).toISOString() };
+    await db.query("INSERT INTO principal_permission_grants VALUES ($1,'user','board','review-preflight:run',$2)", [companyId, grant]);
+    const nativeAuthority = createNativePreflightAuthority(db, subject);
+    const board = { type: "board", id: "board", source: "session" };
+    assert.equal(await nativeAuthority.can(board, "review-preflight:run", companyId), true);
+    assert.equal(await nativeAuthority.can(board, "review-preflight:run", otherCompanyId), false);
+    let acquired, release;
+    const ready = new Promise(resolve => { acquired = resolve; });
+    const hold = new Promise(resolve => { release = resolve; });
+    const publication = db.transaction(async tx => {
+      assert.equal(await nativeAuthority.publicationAuthority(tx, { actorId: "board", companyId }, new AbortController().signal), true);
+      acquired();
+      await hold;
+    }, { signal: new AbortController().signal, timeoutMs: 3_000 });
+    await ready;
+    const revocation = Promise.resolve(sql`DELETE FROM principal_permission_grants WHERE principal_id = 'board'`);
+    try {
+      let blocked = false;
+      for (let attempt = 0; attempt < 60; attempt++) {
+        const probe = await db.query("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE 'DELETE FROM principal_permission_grants%') AS blocked");
+        if (probe.rows[0].blocked) { blocked = true; break; }
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+      assert.equal(blocked, true, "native revocation waits for the publication's native ACL lock");
+    } finally { release(); await publication; await revocation; }
+    assert.equal(await nativeAuthority.can(board, "review-preflight:run", companyId), false, "revocation applies before the next publication");
+    process.stdout.write("native authority: exact subject, company and transactional revocation passed\n");
     const sampleAt = new Date("2026-10-30T12:00:00.000Z");
     const bound = await db.query("SELECT $1::timestamptz AS at, $2::jsonb AS payload, $3::integer AS n, $4::boolean AS ok",
       [sampleAt, { sample: "json" }, 3, true]);

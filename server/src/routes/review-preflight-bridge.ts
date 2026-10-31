@@ -57,7 +57,10 @@ export function reviewPreflightBridgeRoutes(deps: BridgeDependencies, recordActi
       await budget.call(() => recordActivity(req, { action: "review_preflight.reserved", requestId: reservation.id }));
       let publicationUncertain = false;
       try {
-        const evidence = await collectDiagnostic(deps, principal, reservation, budget.signal);
+        const extraction = deps.readerForSession
+          ? { ...deps, reader: deps.readerForSession(req.headers.cookie ?? "") }
+          : deps;
+        const evidence = await collectDiagnostic(extraction, principal, reservation, budget.signal);
         if (evidence) {
           const stored = await budget.call((signal) => deps.store.publishHold({ requestId: reservation.id, companyId, actorId: principal.id, evidence },
             async (guardSignal) => await authorizeRun(deps, principal, companyId, guardSignal)

@@ -817,13 +817,23 @@ export class CodexAppServerDriver implements HarnessDriver {
         `provider_initialize_protocol_error: provider=${this.#options.driverIdentity?.kind ?? "codex"} stage=session.open omitted provider session identity`,
       );
     }
-    const activePermissionProfile = record(thread.activePermissionProfile);
+    const activePermissionProfile = record(response.activePermissionProfile ?? thread.activePermissionProfile);
     const permissionProfileId = text(activePermissionProfile.id);
+    const readOnlyReview = this.#options.environment?.PAPERCLIP_RUNNER_READ_ONLY === "1";
+    const returnedSandbox = record(response.sandbox);
+    const scratch = this.#options.environment?.PAPERCLIP_RUNNER_READ_ONLY_SCRATCH;
+    if (readOnlyReview && (!text(record(response.activePermissionProfile).id)
+      || returnedSandbox.type !== "workspaceWrite" || returnedSandbox.networkAccess !== false
+      || returnedSandbox.excludeTmpdirEnvVar !== true || returnedSandbox.excludeSlashTmp !== true
+      || !Array.isArray(returnedSandbox.writableRoots) || !scratch
+      || returnedSandbox.writableRoots.length !== 1 || returnedSandbox.writableRoots[0] !== scratch)) {
+      throw new Error("Codex thread did not confirm the native read-only sandbox");
+    }
     const requestedMode = this.#options.requestedCollaborationMode ?? "default";
     const requiredPermissionProfile =
       text(createSecuredCodexThreadParams(workingDirectory, requestedMode, true, false, this.#options.environment).permissions);
     if (
-      permissionProfileId.length > 0 &&
+      (permissionProfileId.length > 0 || this.#options.environment?.PAPERCLIP_RUNNER_READ_ONLY === "1") &&
       permissionProfileId !== requiredPermissionProfile
     ) {
       throw new Error(

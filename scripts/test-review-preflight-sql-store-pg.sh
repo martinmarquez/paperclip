@@ -28,7 +28,7 @@ export PGHOST="$root/socket" PGPORT=55495 PGUSER=ren4950_test PGDATABASE=postgre
 export PAPERCLIP_PREFLIGHT_TEST_ROOT="$root"
 psql -At -v ON_ERROR_STOP=1 -c 'SELECT version()'
 psql -v ON_ERROR_STOP=1 -c 'CREATE TABLE companies (id uuid PRIMARY KEY)' >/dev/null
-psql -v ON_ERROR_STOP=1 -f "$(dirname "$0")/../server/src/services/review-preflight-sql-store.sql" >/dev/null
+psql -v ON_ERROR_STOP=1 -f "$(dirname "$0")/../packages/db/src/migrations/0306_review_preflight.sql" >/dev/null
 psql -v ON_ERROR_STOP=1 -c "INSERT INTO companies VALUES ('00000000-0000-4000-8000-000000000010')" >/dev/null
 run_store() { pnpm --dir "$repo_root" --filter @paperclipai/db exec tsx src/review-preflight-sql-store-physical.mjs "$@"; }
 # Two independent Node processes invoke the real store API on separate PG connections.
