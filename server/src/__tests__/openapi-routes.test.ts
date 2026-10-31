@@ -796,6 +796,9 @@ describe("openapi routes", () => {
     const { spec } = loadSpecRoutes();
     const create = spec.paths["/api/companies/{companyId}/review-preflight-extractions"].post;
     const read = spec.paths["/api/companies/{companyId}/review-preflight-extractions/{requestId}"].get;
+    const form = spec.paths["/api/companies/{companyId}/review-preflight-extractions/new"].get;
+    expect(form.security).toEqual(create.security);
+    expect(form.responses["200"].content["text/html"]).toBeDefined();
     expect(create.security).toEqual([{ BoardSessionAuth: [] }]);
     expect(create["x-paperclip-authorization"]).toMatchObject({ actor: "board", capability: "review-preflight:run", optIn: true });
     expect(read.security).toEqual([{ ReviewPreflightAgentJwtAuth: [] }]);

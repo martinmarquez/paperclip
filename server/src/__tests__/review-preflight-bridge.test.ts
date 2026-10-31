@@ -130,6 +130,27 @@ function post(app: ReturnType<typeof setup>["app"], actor = "board", key = "one_
 }
 
 describe("disabled REN-4950 Board bridge contract", () => {
+  it("offers a nonce-protected operator form without extracting data or exposing it to other actors", async () => {
+    const fixture = setup();
+    const page = await request(fixture.app).get(path + "/new").set("x-test-actor", "board");
+    expect(page.status).toBe(200);
+    expect(page.headers["cache-control"]).toBe("no-store");
+    expect(page.headers["content-type"]).toContain("text/html");
+    const nonce = /script-src 'nonce-([^']+)'/.exec(page.headers["content-security-policy"])?.[1];
+    expect(nonce).toBeTruthy();
+    expect(page.text).toContain(`<script nonce="${nonce}">`);
+    expect(page.text).toContain("Collect diagnostic preflight");
+    expect(page.text).not.toContain("SECRET_SENTINEL");
+    for (const actor of ["boardKey", "otherBoard", "devops", "reviewer", "other"]) {
+      expect((await request(fixture.app).get(path + "/new").set("x-test-actor", actor)).status).toBe(403);
+    }
+    fixture.permissions.delete("board-test:review-preflight:run");
+    expect((await request(fixture.app).get(path + "/new").set("x-test-actor", "board")).status).toBe(403);
+    expect(fixture.reads).toBe(0);
+    expect(fixture.audit).toEqual([]);
+    expect(fixture.store.rows.size).toBe(0);
+  });
+
   it("requires current company membership and a writable Board role", async () => {
     expect((await post(setup({ missingBoardMembership: true }).app)).status).toBe(403);
     expect((await post(setup({ boardViewer: true }).app)).status).toBe(403);

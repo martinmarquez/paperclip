@@ -93,3 +93,11 @@ This option is not enabled by importing code or starting the bridge. A Linux CI
 pass does not certify Darwin enforcement. Calibrate the exact installed CLI on
 the actual host without a model turn, then bind the receipt to current role
 configuration and subject. Hold files under the existing retention policy.
+
+The native operator form at
+`/api/companies/{companyId}/review-preflight-extractions/new` uses the existing
+Board browser session and the same scoped run permission. Opening it performs
+no extraction. One explicit button sends an empty POST with a per-page
+idempotency key. It uses an inline script nonce, a restrictive CSP and no cached
+content, retries or polling. Reader agents cannot open it. It adds no frontend
+bundle, dependency or model execution.

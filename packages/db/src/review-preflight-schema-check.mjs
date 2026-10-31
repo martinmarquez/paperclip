@@ -7,6 +7,6 @@ import { reviewPreflightCompanyLocks, reviewPreflightReservations } from "./sche
 const snapshot = JSON.parse(await readFile(new URL("./migrations/meta/0306_snapshot.json", import.meta.url), "utf8"));
 const actual = generateDrizzleJson({ reviewPreflightCompanyLocks, reviewPreflightReservations });
 for (const name of ["public.review_preflight_company_locks", "public.review_preflight_reservations"]) {
-  assert.deepEqual(actual.tables[name], snapshot.tables[name], `Drizzle snapshot drift: ${name}`);
+  assert.deepEqual(JSON.parse(JSON.stringify(actual.tables[name])), snapshot.tables[name], `Drizzle snapshot drift: ${name}`);
 }
 console.log("review preflight Drizzle snapshot matches the declared schema");

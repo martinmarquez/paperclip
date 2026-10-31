@@ -1,6 +1,7 @@
 import { Router, type Request } from "express";
 import { z } from "zod";
 import { assertCompanyAccess } from "./authz.js";
+import { reviewPreflightOperatorPage } from "./review-preflight-operator-page.js";
 import {
   authorizeRead, authorizeRun, boundedOperation, collectDiagnostic, evidenceFresh, reserveRequest, subjectSchema,
   type BridgeDependencies, type Principal,
@@ -16,6 +17,23 @@ export function reviewPreflightBridgeRoutes(deps: BridgeDependencies, recordActi
 }) => Promise<void>) {
   const router = Router();
   if (!deps.enabled) return router;
+
+  router.get("/companies/:companyId/review-preflight-extractions/new", async (req, res) => {
+    const companyId = String(req.params.companyId);
+    assertCompanyAccess(req, companyId);
+    const principal = principalFromRequest(req);
+    const budget = requestBudget(deps, res);
+    try {
+      if (!principal || !await budget.call(signal => authorizeRun(deps, principal, companyId, signal))) {
+        res.status(403).json({ error: "forbidden" }); return;
+      }
+      const page = reviewPreflightOperatorPage(companyId);
+      res.set({ "Cache-Control": "no-store", "Referrer-Policy": "no-referrer", "X-Frame-Options": "DENY",
+        "Content-Security-Policy": `default-src 'none'; script-src 'nonce-${page.nonce}'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'` });
+      res.type("html").send(page.html);
+    } catch { res.status(503).json({ error: "read_uncertain", dispatchAllowed: false }); }
+    finally { budget.close(); }
+  });
 
   router.post("/companies/:companyId/review-preflight-extractions", async (req, res) => {
     const companyId = String(req.params.companyId);

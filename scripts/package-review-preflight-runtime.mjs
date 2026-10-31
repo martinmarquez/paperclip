@@ -10,7 +10,7 @@ const sha256 = bytes => createHash("sha256").update(bytes).digest("hex");
 const sourceSha = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
 assert.equal(sourceSha, process.env.PAPERCLIP_CANDIDATE_SHA);
 const groups = [
-  ["server", "@paperclipai/server", ["app", "index", "routes/openapi", "routes/review-preflight-bridge", "services/heartbeat",
+  ["server", "@paperclipai/server", ["app", "index", "routes/openapi", "routes/review-preflight-bridge", "routes/review-preflight-operator-page", "services/heartbeat",
     "services/native-runtime/native-session-executor", "services/review-preflight-bridge", "services/review-preflight-sql-store",
     "services/review-preflight-authority", "services/review-preflight-board-reader", "services/review-preflight-integration"]],
   ["packages/db", "@paperclipai/db", ["index", "review-preflight-sql", "schema/index", "schema/review_preflight"]],

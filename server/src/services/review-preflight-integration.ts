@@ -55,9 +55,13 @@ export function createProtectedHostReader(config: Integration, db: PreflightSqlD
     const age = Date.now() - Date.parse(receipt.observedAt);
     if (age < -30_000 || age > 15 * 60_000 || process.platform !== "darwin"
       || receipt.manifest.uid !== process.getuid?.() || receipt.manifest.gid !== process.getgid?.()) throw new Error("preflight_host_stale");
-    const current = await db.query<{ adapter_config: unknown; runtime_config: unknown }>(
-      "SELECT adapter_config, runtime_config FROM agents WHERE company_id = $1 AND id = $2",
+    const current = await db.query<{ adapter_type: string; adapter_config: unknown; runtime_config: unknown }>(
+      "SELECT adapter_type, adapter_config, runtime_config FROM agents WHERE company_id = $1 AND id = $2",
       [config.scope.companyId, agentId], signal);
+    if (current.rows[0]?.adapter_type !== "codex_local"
+      || !z.object({ reviewReadOnly: z.literal(true) }).safeParse(current.rows[0]?.adapter_config).success) {
+      throw new Error("preflight_host_enforcement_not_configured");
+    }
     const hash = createHash("sha256").update(canonicalJson(current.rows[0] ?? null)).digest("hex");
     if (hash !== receipt.configurationHash) throw new Error("preflight_host_configuration_changed");
     signal.throwIfAborted();

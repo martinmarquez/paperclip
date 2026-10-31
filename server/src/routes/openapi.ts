@@ -1806,7 +1806,8 @@ function applyDocumentFixups(document: any): any {
                 : { actor: "public" };
 
       const key = operationKey(method, path);
-      if (key === "POST /api/companies/{companyId}/review-preflight-extractions") {
+      if (key === "POST /api/companies/{companyId}/review-preflight-extractions"
+        || key === "GET /api/companies/{companyId}/review-preflight-extractions/new") {
         operation.security = [securityRequirement(BOARD_SESSION_AUTH_SCHEME)];
         operation["x-paperclip-authorization"] = { actor: "board", capability: "review-preflight:run", optIn: true };
       } else if (key === "GET /api/companies/{companyId}/review-preflight-extractions/{requestId}") {
@@ -4566,6 +4567,15 @@ registry.registerPath({
 });
 
 // Review preflight is absent unless the host supplies the reviewed integration.
+registry.registerPath({
+  method: "get", path: "/api/companies/{companyId}/review-preflight-extractions/new",
+  tags: ["review-preflight"], summary: "Open the session-bound operator form for one diagnostic extraction",
+  description: "Opt-in only. Requires the same allowlisted Board session and run capability as POST. Loading the form performs no extraction. No listing, polling or automatic retry.",
+  request: { params: z.object({ companyId: z.string().uuid() }) },
+  responses: { 200: { description: "Protected operator form", content: { "text/html": { schema: z.string() } } },
+    401: r.unauthorized, 403: r.forbidden, 503: r.serverError },
+});
+
 registry.registerPath({
   method: "post",
   path: "/api/companies/{companyId}/review-preflight-extractions",
