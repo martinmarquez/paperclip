@@ -113,6 +113,17 @@ const SKILLLESS_BASE_CONFIG = {
   "features.image_generation": false,
 } as const;
 
+const READ_ONLY_REVIEW_CONFIG = {
+  web_search: "disabled",
+  "features.browser_use": false,
+  "features.browser_use_external": false,
+  "features.browser_use_full_cdp_access": false,
+  "features.in_app_browser": false,
+  "features.code_mode": false,
+  "features.code_mode_only": false,
+  "features.remote_plugin": false,
+} as const;
+
 export function codexCommandEnvironment(
   source: NodeJS.ProcessEnv = process.env,
 ): Record<string, string> {
@@ -128,7 +139,12 @@ export function codexCommandEnvironment(
     const value = source[key];
     if (value !== undefined) environment[key] = value;
   }
-  if (source.PAPERCLIP_GITHUB_AUTH_MODE === "host" && source.PAPERCLIP_GITHUB_HOST_HOME) {
+  if (source.PAPERCLIP_RUNNER_READ_ONLY === "1") {
+    const scratch = source.PAPERCLIP_RUNNER_READ_ONLY_SCRATCH;
+    if (!scratch || !isAbsolute(scratch) || resolve(scratch) === "/") throw new Error("review_read_only_scratch_required");
+    environment.HOME = resolve(scratch);
+    environment.TMPDIR = resolve(scratch);
+  } else if (source.PAPERCLIP_GITHUB_AUTH_MODE === "host" && source.PAPERCLIP_GITHUB_HOST_HOME) {
     environment.HOME = source.PAPERCLIP_GITHUB_HOST_HOME;
   } else if (source.PAPERCLIP_GITHUB_LAUNCHER_DIR) {
     environment.HOME = source.PAPERCLIP_GITHUB_LAUNCHER_DIR;
@@ -174,16 +190,17 @@ export function createIsolatedCodexAppServerArgs(
 ): string[] {
   const gitRoots = gitFilesystemRoots(source);
   readOnlyRoots = [...new Set([...readOnlyRoots, ...codexNetworkReadOnlyRoots(source)])];
-  const networkAccess = codexNetworkAccess(source);
-  const externalRunnerSandbox = usesExternalRunnerSandbox(source);
-  const inheritedGitHubKeys = githubCredentialEnvironmentKeys(source);
+  const readOnlyReview = source.PAPERCLIP_RUNNER_READ_ONLY === "1";
+  const networkAccess = !readOnlyReview && codexNetworkAccess(source);
+  const externalRunnerSandbox = !readOnlyReview && usesExternalRunnerSandbox(source);
+  const inheritedGitHubKeys = readOnlyReview ? [] : githubCredentialEnvironmentKeys(source);
   const hasProjectedEnvironment = inheritedGitHubKeys.length > 0;
   // Codex filters the configured `set` values through include_only as well.
   // Retain the explicit command PATH/HOME/locale settings, not ambient secrets.
   const commandEnvironment = codexCommandEnvironment(source);
   if (instructionWorkingCopyRoot && source.AGENT_HOME === instructionWorkingCopyRoot) commandEnvironment.AGENT_HOME = instructionWorkingCopyRoot;
   const shellEnvironmentKeys = [...new Set([...inheritedGitHubKeys, ...Object.keys(commandEnvironment)])].sort();
-  if (source.PAPERCLIP_GITHUB_LAUNCHER_DIR) readOnlyRoots = [...readOnlyRoots, source.PAPERCLIP_GITHUB_LAUNCHER_DIR];
+  if (!readOnlyReview && source.PAPERCLIP_GITHUB_LAUNCHER_DIR) readOnlyRoots = [...readOnlyRoots, source.PAPERCLIP_GITHUB_LAUNCHER_DIR];
   const deniedHostRoots = [
     ...new Set(
       [source.HOME, source.CODEX_HOME]
@@ -200,12 +217,12 @@ export function createIsolatedCodexAppServerArgs(
     `":tmpdir"="none"`,
     ...deniedHostRoots.map((path) => `${tomlString(path)}="none"`),
     ...readOnlyRoots.map((path) => `${tomlString(resolve(path))}="read"`),
-    ...gitRoots.read.map((path) => `${tomlString(path)}="read"`),
-    ...gitRoots.write.map((path) => `${tomlString(path)}="write"`),
-    ...(instructionWorkingCopyRoot ? [`${tomlString(resolve(instructionWorkingCopyRoot))}="write"`] : []),
-    ...(source.PAPERCLIP_GITHUB_BROKER_TOKEN && source.GH_CONFIG_DIR
+    ...(readOnlyReview ? [] : gitRoots.read).map((path) => `${tomlString(path)}="read"`),
+    ...gitRoots.write.map((path) => `${tomlString(path)}=${tomlString(readOnlyReview ? "read" : "write")}`),
+    ...(instructionWorkingCopyRoot ? [`${tomlString(resolve(instructionWorkingCopyRoot))}=${tomlString(readOnlyReview ? "read" : "write")}`] : []),
+    ...(!readOnlyReview && source.PAPERCLIP_GITHUB_BROKER_TOKEN && source.GH_CONFIG_DIR
       ? [`${tomlString(resolve(source.GH_CONFIG_DIR))}="write"`] : []),
-    `":workspace_roots"={"."="write"}`,
+    `":workspace_roots"={"."=${tomlString(readOnlyReview ? "read" : "write")}}`,
   ].join(",");
   const planningFilesystemRules = [
     `":root"="none"`,
@@ -213,16 +230,18 @@ export function createIsolatedCodexAppServerArgs(
     `":tmpdir"="none"`,
     ...deniedHostRoots.map((path) => `${tomlString(path)}="none"`),
     ...readOnlyRoots.map((path) => `${tomlString(resolve(path))}="read"`),
-    ...[...gitRoots.read, ...gitRoots.write].map((path) => `${tomlString(path)}="read"`),
+    ...[...(readOnlyReview ? [] : gitRoots.read), ...gitRoots.write].map((path) => `${tomlString(path)}="read"`),
     ...(instructionWorkingCopyRoot ? [`${tomlString(resolve(instructionWorkingCopyRoot))}="read"`] : []),
-    ...(source.PAPERCLIP_GITHUB_BROKER_TOKEN && source.GH_CONFIG_DIR
+    ...(!readOnlyReview && source.PAPERCLIP_GITHUB_BROKER_TOKEN && source.GH_CONFIG_DIR
       ? [`${tomlString(resolve(source.GH_CONFIG_DIR))}="write"`] : []),
+    ...(readOnlyReview && source.PAPERCLIP_RUNNER_READ_ONLY_SCRATCH
+      ? [`${tomlString(resolve(source.PAPERCLIP_RUNNER_READ_ONLY_SCRATCH))}="write"`] : []),
     `":workspace_roots"={"."="read"}`,
   ].join(",");
   const commandEnv = Object.entries(commandEnvironment)
     .map(([key, value]) => `${key}=${tomlString(value)}`)
     .join(",");
-  const defaultPermissionProfile = externalRunnerSandbox
+  const defaultPermissionProfile = readOnlyReview ? CODEX_PLANNING_PERMISSION_PROFILE : externalRunnerSandbox
     ? CODEX_EXTERNAL_SANDBOX_PERMISSION_PROFILE
     : CODEX_SKILLLESS_PERMISSION_PROFILE;
   return [
@@ -243,7 +262,7 @@ export function createIsolatedCodexAppServerArgs(
     "-c",
     `permissions.${CODEX_PLANNING_PERMISSION_PROFILE}.filesystem={${planningFilesystemRules}}`,
     "-c",
-    `permissions.${CODEX_PLANNING_PERMISSION_PROFILE}.network.enabled=${networkAccess}`,
+    `permissions.${CODEX_PLANNING_PERMISSION_PROFILE}.network.enabled=${readOnlyReview ? false : networkAccess}`,
     "-c",
     `shell_environment_policy.inherit=${tomlString(hasProjectedEnvironment ? "all" : "none")}`,
     "-c",
@@ -256,6 +275,7 @@ export function createIsolatedCodexAppServerArgs(
     ...(commandEnv.length > 0
       ? ["-c", `shell_environment_policy.set={${commandEnv}}`]
       : []),
+    ...(readOnlyReview ? Object.entries(READ_ONLY_REVIEW_CONFIG).flatMap(([key, value]) => ["-c", `${key}=${JSON.stringify(value)}`]) : []),
     "--disable",
     "image_generation",
     ...(externalRunnerSandbox
@@ -273,17 +293,17 @@ export function createSecuredCodexThreadParams(
   source: NodeJS.ProcessEnv = process.env,
 ): Record<string, unknown> {
   const permissionProfile =
-    mode === "default" && usesExternalRunnerSandbox(source)
+    source.PAPERCLIP_RUNNER_READ_ONLY === "1" ? CODEX_PLANNING_PERMISSION_PROFILE : mode === "default" && usesExternalRunnerSandbox(source)
       ? CODEX_EXTERNAL_SANDBOX_PERMISSION_PROFILE
       : mode === "plan"
       ? CODEX_PLANNING_PERMISSION_PROFILE
       : CODEX_SKILLLESS_PERMISSION_PROFILE;
   return {
     cwd: workingDirectory,
-    config: collaborationThreadConfig(
-      includeCollaborationModeInstructions,
-      includeSkillInstructions,
-    ),
+    config: {
+      ...collaborationThreadConfig(includeCollaborationModeInstructions, includeSkillInstructions),
+      ...(source.PAPERCLIP_RUNNER_READ_ONLY === "1" ? READ_ONLY_REVIEW_CONFIG : {}),
+    },
     permissions: permissionProfile,
     runtimeWorkspaceRoots: [workingDirectory],
   };

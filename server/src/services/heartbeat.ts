@@ -266,6 +266,7 @@ import {
   reconcileRetainedNativeSessionCleanup,
   reconcileRetainedNativeSessionCleanups,
   resolveHeartbeatNativeRuntimeMode,
+  preserveReadOnlyReviewConfig,
 } from "./native-runtime/index.js";
 import {
   assertAgentCoreProfileRecoveryBinding,
@@ -21850,14 +21851,14 @@ export function heartbeatService(
         legacyUseProjectWorkspace:
           issueAssigneeOverrides?.useProjectWorkspace ?? null,
       });
-      const mergedConfig = {
+      const mergedConfig = preserveReadOnlyReviewConfig(parseObject(agent.adapterConfig), {
         ...workspaceManagedConfig,
         ...Object.fromEntries(Object.entries(issueAssigneeOverrides?.adapterConfig ?? {}).filter(([key]) => requestedAiBinding?.mode !== "router" || !["provider", "acpxAgent", "model", "modelReasoningEffort", "reasoningEffort", "effort", "variant"].includes(key))),
         ...(requestedAiBinding?.mode === "router" ? parseObject(parseObject(context.aiRouterSelection).runtimeConfig) : {}),
         // The base below is already task-owned. Keep directory transport while
         // preserving isolated mode and the mandatory sandbox preflight.
         ...(useIsolatedTaskDirectory ? { workspaceStrategy: { type: "project_primary" } } : {}),
-      };
+      });
       const configSnapshot = buildExecutionWorkspaceConfigSnapshot(
         mergedConfig,
         selectedEnvironmentId,
@@ -22011,6 +22012,9 @@ export function heartbeatService(
         resolve: () => resolveAssignedConnectionInstructionsForRun(db, { companyId: agent.companyId, agentId: agent.id, runId: run.id }),
         context, config: connectorDelivery.config, native: agent.adapterType === "paperclip_runner",
       });
+      // Once admitted as a review, a running token must never gain broader tools after a config edit.
+      context.paperclipReviewReadOnly = runtimeConfig.reviewReadOnly === true || run.contextSnapshot?.paperclipReviewReadOnly === true;
+      if (context.paperclipReviewReadOnly) runtimeConfig = { ...runtimeConfig, reviewReadOnly: true };
       const resolvedFailureSecrets = readFailureReportSecrets();
       readFailureReportSecrets = () => [
         ...resolvedFailureSecrets,
@@ -25050,6 +25054,7 @@ export function heartbeatService(
                         process.env,
                         executionWorkspace.cwd,
                       ),
+                      PAPERCLIP_RUNNER_READ_ONLY: runtimeConfig.reviewReadOnly === true ? "1" : "0",
                       ...(instructionCopy && isAgentDirectoryCopy(instructionCopy) ? { AGENT_HOME: instructionCopy.executionRoot } : {}),
                       ...(nativeMcpServer
                         ? {
@@ -25201,7 +25206,8 @@ export function heartbeatService(
               });
             }
             if (authToken && configuredPaperclipApiBaseUrl() && issueRef) {
-              runtimeMcpServers.unshift({ name: "Paperclip projects", url: `${paperclipApiBaseUrl()}/api/mcp/project-tools`,
+              if (runtimeConfig.reviewReadOnly === true) runtimeMcpServers.splice(0);
+              runtimeMcpServers.unshift({ name: runtimeConfig.reviewReadOnly === true ? "Paperclip review task" : "Paperclip projects", url: `${paperclipApiBaseUrl()}/api/mcp/project-tools`,
                 token: authToken, connectionId: "paperclip-project-tools" });
             }
             const runtimeMcp = createAdapterRuntimeMcpAccess(runtimeMcpServers);

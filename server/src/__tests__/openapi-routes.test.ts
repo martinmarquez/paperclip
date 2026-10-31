@@ -65,6 +65,7 @@ const apiPrefixes: Record<string, string> = {
   "project-tools.ts": "/api",
   "resource-memberships.ts": "/api",
   "remote-agent-profiles.ts": "/api",
+  "review-preflight-bridge.ts": "/api",
   "routines.ts": "/api",
   "secrets.ts": "/api",
   "sidebar-badges.ts": "/api",
@@ -789,6 +790,28 @@ describe("openapi routes", () => {
       extraInSpec: [],
       excludedRoutes: [...explicitOpenApiOperationCoverageExclusions].sort(),
     });
+  });
+
+  it("documents opt-in review preflight with narrow session and JWT capabilities", () => {
+    const { spec } = loadSpecRoutes();
+    const create = spec.paths["/api/companies/{companyId}/review-preflight-extractions"].post;
+    const read = spec.paths["/api/companies/{companyId}/review-preflight-extractions/{requestId}"].get;
+    const form = spec.paths["/api/companies/{companyId}/review-preflight-extractions/new"].get;
+    expect(form.security).toEqual(create.security);
+    expect(form.responses["200"].content["text/html"]).toBeDefined();
+    expect(create.security).toEqual([{ BoardSessionAuth: [] }]);
+    expect(create["x-paperclip-authorization"]).toMatchObject({ actor: "board", capability: "review-preflight:run", optIn: true });
+    expect(read.security).toEqual([{ ReviewPreflightAgentJwtAuth: [] }]);
+    expect(read["x-paperclip-authorization"]).toMatchObject({ actor: "agent", capability: "review-preflight:evidence-read", requestScoped: true, optIn: true });
+    expect(create.responses["202"]).toBeDefined();
+    expect(create.responses["409"]).toBeDefined();
+    expect(create.responses["429"]).toBeDefined();
+    expect(create.responses["503"].content["application/json"].schema.oneOf).toEqual([
+      expect.objectContaining({ required: ["error"] }),
+      expect.objectContaining({ required: ["status", "dispatchAllowed"] }),
+    ]);
+    expect(read.responses["410"]).toBeDefined();
+    expect(create.parameters).toContainEqual(expect.objectContaining({ in: "header", name: "idempotency-key", required: true }));
   });
 
   it("documents board-only repository discovery and selection", () => {

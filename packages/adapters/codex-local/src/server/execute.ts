@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { inferOpenAiCompatibleBiller, type AdapterExecutionContext, type AdapterExecutionResult } from "@paperclipai/adapter-utils";
 import { buildCodexAuthInboundProvision } from "./codex-auth-merge-scripts.js";
 import { copyBackCodexAuth } from "./codex-auth-copyback.js";
+import { prepareReviewHome, reviewIsolationArgs, verifyReviewDefault } from "./review-isolation.js";
 import {
   ensureCodexAuthCacheEntryDir,
   isCodexAuthCacheEnabled,
@@ -571,6 +572,9 @@ export async function ensureCodexSkillsInjected(
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
   const providerStop = createProviderStoppedBoundary(ctx.onProviderStopped);
   const engineSelection = await resolveCodexExecutionEngineForRun(ctx);
+  const readOnlyReview = ctx.config.reviewReadOnly === true;
+  if (readOnlyReview) buildCodexExecArgs(ctx.config);
+  if (readOnlyReview && engineSelection.engine !== "cli") throw new Error("reviewReadOnly requires the local Codex CLI engine");
   if (engineSelection.unavailableReason) {
     return {
       exitCode: 1,
@@ -637,6 +641,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const cwd = effectiveWorkspaceCwd || configuredCwd || process.cwd();
   const envConfig = parseObject(config.env);
   const executionTargetIsRemote = adapterExecutionTargetIsRemote(executionTarget);
+  if (readOnlyReview && executionTargetIsRemote) throw new Error("reviewReadOnly remote fallback is denied");
   let configuredCodexHome =
     typeof envConfig.CODEX_HOME === "string" && envConfig.CODEX_HOME.trim().length > 0
       ? path.resolve(envConfig.CODEX_HOME.trim())
@@ -710,7 +715,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     });
   }
   const defaultCodexHome = resolveManagedCodexHomeDir(process.env, agent.companyId);
-  const effectiveCodexHome = configuredCodexHome ?? defaultCodexHome;
+  let effectiveCodexHome = configuredCodexHome ?? defaultCodexHome;
   await fs.mkdir(effectiveCodexHome, { recursive: true });
 
   // Never launch a managed CODEX_HOME with no credentials. Without auth.json
@@ -750,7 +755,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   // here so the outer `finally` can remove it on every exit path (teardown and
   // error), never only the happy path.
   let stagedCodexHomeDir: string | null = null;
+  let reviewHome: Awaited<ReturnType<typeof prepareReviewHome>> | null = null;
   try {
+    if (readOnlyReview) {
+      reviewHome = await prepareReviewHome(effectiveCodexHome);
+      effectiveCodexHome = reviewHome.home;
+    }
     for (const note of preparedRuntimeConfig.notes) {
       await onLog("stdout", `[paperclip] ${note}\n`);
     }
@@ -760,7 +770,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       endpointPath: server.url,
       bearerToken: server.token,
     }));
-    const managedMcpGateways = mergeManagedCodexMcpGateways(
+    const managedMcpGateways = readOnlyReview ? runtimeMcpGateways.filter(gateway =>
+      gateway.name === "Paperclip review task") : mergeManagedCodexMcpGateways(
       runtimeMcpGateways,
       managedMcpGatewaysFromContext(context),
     );
@@ -781,7 +792,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     // Inject skills into the same CODEX_HOME that Codex will actually run with
     // (managed home in the default case, or an explicit override from adapter config).
     const codexSkillsDir = resolveCodexSkillsDir(effectiveCodexHome);
-    await ensureCodexSkillsInjected(
+    if (!readOnlyReview) await ensureCodexSkillsInjected(
       onLog,
       {
         skillsHome: codexSkillsDir,
@@ -997,7 +1008,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const networkScope = parseLocalProcessNetworkScope(config.networkScope);
     const filesystemScope = parseLocalProcessFilesystemScope(config.filesystemScope);
     const localProcessSandbox: LocalProcessSandboxOptions | null =
-      (filesystemScope || networkScope) && !executionTargetIsRemote
+      !readOnlyReview && (filesystemScope || networkScope) && !executionTargetIsRemote
         ? {
             workspaceDir: effectiveExecutionCwd,
             filesystemScope,
@@ -1031,7 +1042,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         (entry): entry is [string, string] => typeof entry[1] === "string",
       ),
     );
-    await ensureAdapterExecutionTargetRuntimeCommandInstalled({
+    if (!readOnlyReview) await ensureAdapterExecutionTargetRuntimeCommandInstalled({
       runId,
       target: executionTarget,
       installCommand: ctx.runtimeCommandSpec?.installCommand,
@@ -1043,6 +1054,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       onLog,
     });
     await ensureAdapterExecutionTargetCommandResolvable(command, executionTarget, cwd, runtimeEnv);
+    const reviewArgs = reviewHome ? reviewIsolationArgs(cwd, reviewHome.home, reviewHome.scratch, runtimeEnv) : [];
+    if (reviewHome) {
+      if (managedMcpGateways.length !== 1) throw new Error("review_task_gateway_required");
+      await verifyReviewDefault(command, reviewArgs, cwd, runtimeEnv, reviewHome.scratch, onSpawn);
+      await onLog("stdout", "[paperclip] Native read-only CLI profile acknowledged before provider work.\n");
+    }
     const resolvedCommand = await resolveAdapterExecutionTargetCommandForLogs(command, executionTarget, cwd, runtimeEnv);
     const loggedEnv = buildInvocationEnvForLogs(env, {
       runtimeEnv,
@@ -1072,7 +1089,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       adapterExecutionTargetSessionMatches(runtimeRemoteExecution, runtimeExecutionTarget);
     const codexTransientFallbackMode = readCodexTransientFallbackMode(context);
     const forceSaferInvocation = fallbackModeUsesSaferInvocation(codexTransientFallbackMode);
-    const forceFreshSession = fallbackModeUsesFreshSession(codexTransientFallbackMode);
+    const forceFreshSession = readOnlyReview || fallbackModeUsesFreshSession(codexTransientFallbackMode);
     const sessionId = canResumeSession && !forceFreshSession ? runtimeSessionId : null;
     if (executionTargetIsRemote && runtimeSessionId && !canResumeSession) {
       await onLog(
@@ -1201,6 +1218,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         : renderTemplate(promptTemplate, templateData);
       const sessionHandoffNote = asString(context.paperclipSessionHandoffMarkdown, "").trim();
       const prompt = joinPromptSections([
+        readOnlyReview ? "Read-only review: source changes and shell network are denied. Use the Paperclip review task MCP tool for your run-bound task context, checkout, document evidence and final status. Never attempt API calls from the shell. Save the review report as a task document before completion." : "",
         promptInstructionsPrefix,
         renderedBootstrapPrompt,
         selectInitialCommunicationGuidance(context, { resumedSession: Boolean(resumeSessionId) }),
@@ -1227,7 +1245,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           networkAccess: env.PAPERCLIP_RUNNER_NETWORK_ACCESS !== "disabled",
         },
       );
-      const args = execArgs.args;
+      const args = [...reviewArgs, ...execArgs.args];
       const commandNotesWithFastMode =
         execArgs.fastModeIgnoredReason == null
           ? commandNotes
@@ -1611,6 +1629,19 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       }
     }
   } finally {
+    let reviewCleanupError: unknown;
+    if (reviewHome) {
+      try {
+        if (reviewHome.authPath) await copyBackCodexAuth({
+          readSandboxAuth: () => fs.readFile(path.join(reviewHome!.home, "auth.json")),
+          hostAuthPath: reviewHome.authPath,
+          log: line => onLog("stdout", `${line}\n`),
+        });
+      } catch (error) { reviewCleanupError = error; }
+      finally {
+        await fs.rm(reviewHome.home, { recursive: true, force: true }).catch(error => { reviewCleanupError ??= error; });
+      }
+    }
     // Remove the staged CODEX_HOME allowlist temp dir on every exit path
     // (teardown AND error), never only the happy path. Cleanup failure is
     // logged, not fatal — a leaked temp dir must not crash the run.
@@ -1633,5 +1664,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     // prepareCodexRuntimeConfig restores the original from the pre-run backup
     // written at prepare time.
     await preparedRuntimeConfig.cleanup();
+    if (reviewCleanupError) throw reviewCleanupError;
   }
 }

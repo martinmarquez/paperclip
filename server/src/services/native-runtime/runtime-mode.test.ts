@@ -4,6 +4,7 @@ import { BUILTIN_ADAPTER_TYPES } from "../../adapters/builtin-adapter-types.js";
 import {
   NativeRunnerSelectionError,
   NativeRuntimeEligibilityError,
+  preserveReadOnlyReviewConfig,
   isRunnerIngressAuthorized,
   resolveHeartbeatNativeRuntimeMode,
   resolveHeartbeatRuntimeMode,
@@ -19,6 +20,19 @@ const eligible = {
   target: { kind: "local" },
   workspaceId: "workspace",
 } as const;
+
+describe("stored native review isolation", () => {
+  it("preserves the role boundary across task and router overrides without mutating the input", () => {
+    const effective = { reviewReadOnly: false, cwd: "/assigned/source", model: "selected-model" };
+    expect(preserveReadOnlyReviewConfig({ reviewReadOnly: true }, effective))
+      .toEqual({ ...effective, reviewReadOnly: true });
+    expect(effective.reviewReadOnly).toBe(false);
+  });
+  it("preserves ordinary defaults and permits a narrower per-run request", () => {
+    expect(preserveReadOnlyReviewConfig({}, { model: "selected-model" })).toEqual({ model: "selected-model" });
+    expect(preserveReadOnlyReviewConfig({}, { reviewReadOnly: true })).toEqual({ reviewReadOnly: true });
+  });
+});
 
 describe("resolveNativeRuntimeMode", () => {
   it("keeps every direct built-in adapter outside native arbitration", () => {

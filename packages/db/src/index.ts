@@ -14,6 +14,7 @@ export {
   type MigrationBootstrapResult,
   type Db,
 } from "./client.js";
+export { createReviewPreflightSqlDatabase, type PreflightSqlDatabase, type PreflightSqlExecutor } from "./review-preflight-sql.js";
 export {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,

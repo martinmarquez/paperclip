@@ -320,6 +320,7 @@ type OpenApiPathRegistration = {
   request?: {
     params?: z.ZodTypeAny;
     query?: z.ZodTypeAny;
+    headers?: z.ZodTypeAny;
     body?: {
       content: Record<string, { schema: unknown }>;
       required?: boolean;
@@ -595,7 +596,7 @@ function normalizeResponses(responses: Record<string, OpenApiResponse> = {}) {
 
 function parametersFromSchema(
   schema: z.ZodTypeAny,
-  location: "path" | "query",
+  location: "path" | "query" | "header",
 ) {
   const objectSchema = unwrapSchema(schema);
   if (zodTypeName(objectSchema) !== "object") return [];
@@ -639,6 +640,12 @@ class OpenAPIRegistry {
         normalizedOperation.parameters = [
           ...((normalizedOperation.parameters as unknown[]) ?? []),
           ...parametersFromSchema(request.query, "query"),
+        ];
+      }
+      if (request?.headers) {
+        normalizedOperation.parameters = [
+          ...((normalizedOperation.parameters as unknown[]) ?? []),
+          ...parametersFromSchema(request.headers, "header"),
         ];
       }
       if (request?.body) {
@@ -1725,6 +1732,12 @@ function applyOperationStatusOverride(
 function applyDocumentFixups(document: any): any {
   document.components ??= {};
   document.components.securitySchemes = {
+    ReviewPreflightAgentJwtAuth: {
+      type: "http",
+      scheme: "bearer",
+      bearerFormat: "Paperclip native agent JWT",
+      description: "Only configured readers with an exact request-scoped evidence grant. Legacy agent keys and reviewer identities are denied.",
+    },
     [BOARD_SESSION_AUTH_SCHEME]: {
       type: "apiKey",
       in: "cookie",
@@ -1793,6 +1806,14 @@ function applyDocumentFixups(document: any): any {
                 : { actor: "public" };
 
       const key = operationKey(method, path);
+      if (key === "POST /api/companies/{companyId}/review-preflight-extractions"
+        || key === "GET /api/companies/{companyId}/review-preflight-extractions/new") {
+        operation.security = [securityRequirement(BOARD_SESSION_AUTH_SCHEME)];
+        operation["x-paperclip-authorization"] = { actor: "board", capability: "review-preflight:run", optIn: true };
+      } else if (key === "GET /api/companies/{companyId}/review-preflight-extractions/{requestId}") {
+        operation.security = [securityRequirement("ReviewPreflightAgentJwtAuth")];
+        operation["x-paperclip-authorization"] = { actor: "agent", capability: "review-preflight:evidence-read", requestScoped: true, optIn: true };
+      }
       if (authLevel !== "public") {
         const responses = (operation.responses ??= {}) as Record<
           string,
@@ -4543,6 +4564,52 @@ registry.registerPath({
   summary: "Delete a label",
   request: { params: z.object({ labelId: z.string() }) },
   responses: { 200: r.ok(), 401: r.unauthorized },
+});
+
+// Review preflight is absent unless the host supplies the reviewed integration.
+registry.registerPath({
+  method: "get", path: "/api/companies/{companyId}/review-preflight-extractions/new",
+  tags: ["review-preflight"], summary: "Open the session-bound operator form for one diagnostic extraction",
+  description: "Opt-in only. Requires the same allowlisted Board session and run capability as POST. Loading the form performs no extraction. No listing, polling or automatic retry.",
+  request: { params: z.object({ companyId: z.string().uuid() }) },
+  responses: { 200: { description: "Protected operator form", content: { "text/html": { schema: z.string() } } },
+    401: r.unauthorized, 403: r.forbidden, 503: r.serverError },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/companies/{companyId}/review-preflight-extractions",
+  tags: ["review-preflight"],
+  summary: "Reserve a diagnostic extraction for the server-selected review subject",
+  description: "Opt-in only. Requires an allowed Board session, exact origin and live run capability. One extraction per company/hour; uncertain reservations are never replayed. Results remain HOLD and cannot dispatch reviewers.",
+  request: {
+    params: z.object({ companyId: z.string().uuid() }),
+    headers: z.object({ "idempotency-key": z.string().min(16).max(128).regex(/^[a-zA-Z0-9_-]+$/) }),
+    body: jsonBody(z.strictObject({})),
+  },
+  responses: {
+    202: r.ok(z.object({ requestId: z.string().uuid(), status: z.enum(["pending", "hold", "uncertain"]), dispatchAllowed: z.literal(false) })),
+    400: r.badRequest, 401: r.unauthorized, 403: r.forbidden,
+    409: r.conflict, 429: r.tooManyRequests,
+    503: {
+      description: "Subject unavailable or reservation outcome uncertain; do not replay extraction",
+      content: { "application/json": { schema: z.union([z.object({ error: z.string() }), z.object({ status: z.literal("uncertain"), dispatchAllowed: z.literal(false) })]) } },
+    },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/companies/{companyId}/review-preflight-extractions/{requestId}",
+  tags: ["review-preflight"],
+  summary: "Read sanitized diagnostic evidence for an explicitly granted request",
+  description: "Opt-in only. Restricted to configured reader agents using native JWTs and an exact request grant. Expired requests return 410; stale evidence is withheld. Always HOLD with dispatchAllowed false.",
+  request: { params: z.object({ companyId: z.string().uuid(), requestId: z.string().uuid() }) },
+  responses: {
+    200: r.ok(z.object({ requestId: z.string().uuid(), status: z.enum(["pending", "hold"]), expiresAt: z.string().datetime(), evidence: z.record(z.string(), z.unknown()).nullable(), decision: z.literal("HOLD"), dispatchAllowed: z.literal(false) })),
+    401: r.unauthorized, 403: r.forbidden, 404: r.notFound,
+    410: { description: "Reservation expired" }, 503: r.serverError,
+  },
 });
 
 // ─── Projects ────────────────────────────────────────────────────────────────

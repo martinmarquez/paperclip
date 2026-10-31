@@ -12,6 +12,41 @@ import {
 } from "./codex-security-config.js";
 
 describe("Codex security configuration", () => {
+  it("forces native read-only review despite external bypass and host Git credentials", () => {
+    const source = { HOME: "/host", CODEX_HOME: "/host/codex", PATH: "/bin",
+      PAPERCLIP_RUNNER_READ_ONLY: "1", PAPERCLIP_RUNNER_READ_ONLY_SCRATCH: "/private/review/scratch",
+      PAPERCLIP_RUNNER_EXTERNAL_SANDBOX: "1", PAPERCLIP_RUNNER_NETWORK_ACCESS: "enabled",
+      GH_TOKEN: "secret", PAPERCLIP_GITHUB_AUTH_MODE: "host", PAPERCLIP_GITHUB_HOST_HOME: "/host",
+      PAPERCLIP_GITHUB_LAUNCHER_DIR: "/broker", GH_CONFIG_DIR: "/broker/gh", PAPERCLIP_GITHUB_BROKER_TOKEN: "secret",
+      PAPERCLIP_GIT_METADATA_ROOTS: '["/repo/.git"]' };
+    const args = createIsolatedCodexAppServerArgs(source).join("\n");
+    expect(args).toContain('default_permissions="paperclip-runner-workspace-read-only"');
+    expect(args).toContain('"/private/review/scratch"="write"');
+    expect(args).toContain('HOME="/private/review/scratch"');
+    expect(args).toContain('TMPDIR="/private/review/scratch"');
+    expect(args).toContain('"/repo/.git"="read"');
+    expect(args).not.toContain('"/repo/.git"="write"');
+    expect(args).not.toContain('"."="write"');
+    expect(args).not.toContain('"/broker"="read"');
+    expect(args).not.toContain('"/host/.ssh"="read"');
+    expect(args).not.toContain('network.enabled=true');
+    expect(args).not.toContain("dangerously-bypass");
+    expect(args).not.toContain("GH_TOKEN");
+    expect(args).not.toContain("secret");
+    expect(args).toContain("features.browser_use=false");
+    expect(args).toContain('web_search="disabled"');
+    expect(createSecuredCodexThreadParams("/repo", "default", true, false, source)).toMatchObject({
+      permissions: "paperclip-runner-workspace-read-only",
+      config: { web_search: "disabled", "features.browser_use": false, "features.browser_use_external": false,
+        "features.browser_use_full_cdp_access": false, "features.in_app_browser": false,
+        "features.code_mode": false, "features.code_mode_only": false, "features.remote_plugin": false },
+    });
+    for (const scratch of [undefined, "/", "relative"]) {
+      expect(() => createIsolatedCodexAppServerArgs({ ...source, PAPERCLIP_RUNNER_READ_ONLY_SCRATCH: scratch }))
+        .toThrow("scratch_required");
+    }
+  });
+
   it("allows only the registered private instruction directory while keeping shared context read-only", () => {
     const args = createIsolatedCodexAppServerArgs({ HOME: "/host/home" }, ["/runtime/immutable-context"], "/runtime/instruction-edits/run-1").join("\n");
     expect(args).toContain('"/runtime/instruction-edits/run-1"="write"');

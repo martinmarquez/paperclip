@@ -48,6 +48,7 @@ import {
 } from "@paperclipai/db";
 import detectPort from "detect-port";
 import { createApp } from "./app.js";
+import { loadReviewPreflightIntegration } from "./services/review-preflight-integration.js";
 import { loadConfig } from "./config.js";
 import { logger } from "./middleware/logger.js";
 import { setStartupRecoveryPhase } from "./startup-recovery-state.js";
@@ -889,6 +890,7 @@ async function startServerWithDatabaseTeardown(
   // self-hosted: createApp falls back to its built-in kubernetes-only default.
   const managedPluginAutoInstall = managedConfig?.plugins.autoInstall ?? null;
   const app = await createApp(db as any, {
+    reviewPreflightBridge: await loadReviewPreflightIntegration(db, listenPort),
     cloudWarmStandby: isWarmStandby,
     uiMode,
     serverPort: listenPort,

@@ -9,6 +9,11 @@ import {
   type PaperclipRunnerProviderProfile,
 } from "./provider-profile.js";
 
+// Task and router overrides may narrow a run, but cannot clear the stored reviewer boundary.
+export function preserveReadOnlyReviewConfig(stored: Record<string, unknown>, effective: Record<string, unknown>): Record<string, unknown> {
+  return stored.reviewReadOnly === true ? { ...effective, reviewReadOnly: true } : effective;
+}
+
 /**
  * Public compatibility resolver version. This value is persisted by the
  * original heartbeat selection seam and must remain stable for existing runs
