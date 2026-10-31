@@ -14,6 +14,11 @@ allowlists, subject, exact origin, live permission checks and Board/host reader.
 It creates the store with `ReviewPreflightSqlStore` and
 `createReviewPreflightSqlDatabase(db)`. The native adapter uses a dedicated
 connection for each transaction so cancellation never closes a shared client.
+It gives PostgreSQL a server-side statement deadline based on the remaining
+transaction time. Cancellation observes the pinned postgres.js canceller promise
+(its public `cancel()` discards it), allows a bounded acknowledgement interval,
+then closes only the dedicated connection. Physical CI requires external
+cancellation to finish before the statement timeout and leave no live query.
 It reuses the already installed TOML parser. There are no new services,
 providers, credentials or default grants.
 
@@ -42,6 +47,7 @@ processes. It checks restart, company/actor scope, idempotency, quota, expiry,
 publication, cancellation, actual JSONB readback and teardown. It refuses an
 inherited/shared database target. Typechecking, unit tests and build still come
 from canonical CI; local syntax checks are not those gates.
+The pinned workflow owns lockfile resolution; PRs must not commit its generated lockfile.
 
 ## Activation remains separate
 

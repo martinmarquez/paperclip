@@ -128,6 +128,18 @@ try {
     const runningSleeps = await sql`SELECT count(*)::integer AS count FROM pg_stat_activity
       WHERE pid <> pg_backend_pid() AND state = 'active' AND query LIKE '%pg_sleep(30)%'`;
     assert.equal(runningSleeps[0].count, 0, "cancelled operation leaves no live privileged query");
+    const externalStop = new AbortController();
+    let externalStartedAt;
+    await assert.rejects(db.transaction(async tx => {
+      externalStartedAt = performance.now();
+      const stopTimer = setTimeout(() => externalStop.abort(), 200);
+      try { await tx.query("SELECT pg_sleep(30)"); }
+      finally { clearTimeout(stopTimer); }
+    }, { signal: externalStop.signal, timeoutMs: 3_000 }));
+    assert.ok(performance.now() - externalStartedAt < 1_500, "external cancellation settles before the server statement deadline");
+    const afterStop = await sql`SELECT count(*)::integer AS count FROM pg_stat_activity
+      WHERE pid <> pg_backend_pid() AND state = 'active' AND query LIKE '%pg_sleep(30)%'`;
+    assert.equal(afterStop[0].count, 0, "external cancellation is acknowledged without leaving a running query");
     assert.equal(await store.publishHold({ requestId: id, companyId, actorId: "board", evidence: evidence(pending) }, async () => true), true);
     const storedEvidence = (await store.get(companyId, id))?.evidence;
     assert.ok(storedEvidence, "published evidence is readable after jsonb storage");

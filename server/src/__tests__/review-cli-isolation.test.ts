@@ -1,13 +1,14 @@
-import { describe, it, expect } from "vitest";
-import { mkdtemp, mkdir, writeFile, readFile, rm, stat } from "node:fs/promises";
+import { describe, it, expect, vi } from "vitest";
+import { mkdtemp, mkdir, writeFile, readFile, rm, stat, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { parse } from "smol-toml";
 import { buildCodexExecArgs } from "../../../packages/adapters/codex-local/src/server/codex-args.js";
 import { REVIEW_PROFILE, reviewIsolationArgs, prepareReviewHome, assertReviewProfile,
   verifyReviewDefault } from "../../../packages/adapters/codex-local/src/server/review-isolation.js";
-import { reviewTaskRequest } from "../services/review-task-tools.js";
+import { reviewTaskRequest, callReviewTaskTool } from "../services/review-task-tools.js";
 import { execute } from "@paperclipai/adapter-codex-local/server";
+import { cancelPreflightQuery } from "../../../packages/db/src/review-preflight-sql.js";
 
 describe("local CLI review isolation", () => {
   it("denies legacy overrides, resume, search and default bypass", () => {
@@ -35,7 +36,7 @@ describe("local CLI review isolation", () => {
       expect(parse(await readFile(path.join(prepared.home, "config.toml"), "utf8"))).toEqual({ model: "same-model" });
       expect((await stat(path.join(prepared.home, "auth.json"))).mode & 0o777).toBe(0o600);
       await expect(stat(path.join(prepared.home, "sessions.sqlite"))).rejects.toThrow();
-      expect(prepared.authPath).toBe(path.join(source, "auth.json"));
+      expect(prepared.authPath).toBe(await realpath(path.join(source, "auth.json")));
     } finally {
       await rm(source, { recursive: true, force: true });
       if (prepared) await rm(prepared.home, { recursive: true, force: true });
@@ -101,6 +102,30 @@ if (argv.includes('app-server')) {
 });
 
 describe("review task gateway", () => {
+  it("observes the pinned driver's real cancellation promise exactly once", async () => {
+    const canceller = vi.fn().mockRejectedValue(new Error("cancel connection unavailable"));
+    const query = { cancel: vi.fn(() => { throw new Error("public cancel discards the promise"); }), canceller };
+    await expect(cancelPreflightQuery(query)).resolves.toBeUndefined();
+    await expect(cancelPreflightQuery(query)).resolves.toBeUndefined();
+    expect(canceller).toHaveBeenCalledTimes(1);
+    expect(query.cancel).not.toHaveBeenCalled();
+    expect(query.canceller).toBeNull();
+  });
+  it("reports non-JSON proxy errors and returns MCP-compatible comment arrays", async () => {
+    const input = { arguments: { operation: "get_comments" }, issueId: "own", agentId: "reviewer",
+      runId: "run", apiUrl: "http://localhost/api", token: "fixture-token" };
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      fetchMock.mockResolvedValueOnce(new Response("<h1>Bad gateway</h1>", { status: 502 }));
+      await expect(callReviewTaskTool(input)).rejects.toThrow(/502/);
+      fetchMock.mockResolvedValueOnce(new Response("null", { status: 403 }));
+      await expect(callReviewTaskTool(input)).rejects.toThrow(/403/);
+      fetchMock.mockResolvedValueOnce(new Response('[{"body":"review"}]', { status: 200 }));
+      expect(await callReviewTaskTool(input)).toEqual({ items: [{ body: "review" }] });
+      expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({ redirect: "error", headers: { "X-Paperclip-Run-Id": "run" } });
+    } finally { vi.unstubAllGlobals(); }
+  });
   it("binds all paths and mutation identities on the server and keeps revision control", () => {
     expect(reviewTaskRequest({ operation: "checkout" }, "own", "reviewer")).toMatchObject({
       path: "/issues/own/checkout", body: { agentId: "reviewer" } });

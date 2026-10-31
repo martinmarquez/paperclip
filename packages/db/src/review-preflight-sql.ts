@@ -1,5 +1,14 @@
 import { withDedicatedDbConnection, type Db } from "./client.js";
 
+// postgres.js 3.4.9's public cancel() discards this promise. Observe failure without an unhandled rejection.
+export async function cancelPreflightQuery(query: object): Promise<void> {
+  const cancel: unknown = Reflect.get(query, "canceller");
+  if (typeof cancel !== "function") return;
+  Reflect.set(query, "canceller", null);
+  try { await cancel(query); }
+  catch { /* The server statement deadline and dedicated-connection close remain the backstops. */ }
+}
+
 export interface PreflightSqlExecutor {
   query<T extends Record<string, unknown>>(text: string, params?: readonly unknown[], signal?: AbortSignal): Promise<{ rows: T[] }>;
 }
@@ -23,10 +32,7 @@ function executor(client: Pick<Db["$client"], "unsafe">, defaultSignal?: AbortSi
     async query<T extends Record<string, unknown>>(text: string, params: readonly unknown[] = [], signal?: AbortSignal) {
       if (signal?.aborted || defaultSignal?.aborted) throw new Error("preflight_sql_cancelled");
       const pending = client.unsafe<T[]>(text, parameters(params));
-      const cancel = () => {
-        try { pending.cancel(); }
-        catch { /* The transaction deadline also closes its dedicated connection. */ }
-      };
+      const cancel = () => { void cancelPreflightQuery(pending); };
       signal?.addEventListener("abort", cancel, { once: true });
       defaultSignal?.addEventListener("abort", cancel, { once: true });
       try {
@@ -49,23 +55,33 @@ export function createReviewPreflightSqlDatabase(db: Db): PreflightSqlDatabase {
       if (options.signal.aborted) throw new Error("preflight_sql_cancelled");
       return withDedicatedDbConnection(db, async (dedicated) => {
         const controller = new AbortController();
+        const cancelSettleMs = Math.min(250, Math.max(1, Math.floor(options.timeoutMs / 4)));
+        const deadline = performance.now() + options.timeoutMs;
+        let forceClose: ReturnType<typeof setTimeout> | undefined;
         const abort = () => {
+          if (controller.signal.aborted) return;
           controller.abort();
-          // End only this operation's connection, including a pending BEGIN/COMMIT.
-          void dedicated.$client.end({ timeout: 0 }).catch(() => {});
+          // Give PostgreSQL's cancel response time to settle before closing its socket.
+          forceClose = setTimeout(() => { void dedicated.$client.end({ timeout: 0 }).catch(() => {}); }, cancelSettleMs);
         };
         options.signal.addEventListener("abort", abort, { once: true });
+        if (options.signal.aborted) abort();
         const timer = setTimeout(abort, options.timeoutMs);
         try {
           const boxed = await dedicated.$client.begin(async (tx) => {
             if (controller.signal.aborted) throw new Error("preflight_sql_cancelled");
+            // A closed socket alone does not interrupt a running backend query.
+            const remaining = Math.floor(deadline - performance.now() - cancelSettleMs);
+            if (remaining <= 0) throw new Error("preflight_sql_cancelled");
+            await tx`SELECT set_config('statement_timeout', ${String(remaining)}, true)`;
             const result = await work(executor(tx, controller.signal));
-            if (controller.signal.aborted) throw new Error("preflight_sql_cancelled");
+            if (controller.signal.aborted || performance.now() >= deadline) throw new Error("preflight_sql_cancelled");
             return { value: result };
           });
           return boxed.value;
         } finally {
           clearTimeout(timer);
+          if (forceClose) clearTimeout(forceClose);
           options.signal.removeEventListener("abort", abort);
         }
       });

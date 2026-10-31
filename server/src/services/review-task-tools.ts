@@ -54,7 +54,11 @@ export async function callReviewTaskTool(input: {
       chunks.push(chunk.value);
     }
   } finally { await reader.cancel(); }
-  const result = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-  if (!response.ok) throw badRequest(typeof result.error === "string" ? result.error : `Review request failed (${response.status})`);
-  return result;
+  let result: unknown;
+  try { result = JSON.parse(Buffer.concat(chunks).toString("utf8")); }
+  catch { throw badRequest(`Review response is not JSON (${response.status})`); }
+  if (!response.ok) throw badRequest(result !== null && typeof result === "object" && "error" in result && typeof result.error === "string"
+    ? result.error : `Review request failed (${response.status})`);
+  if (result === null || typeof result !== "object") throw badRequest(`Review response is not an object (${response.status})`);
+  return Array.isArray(result) ? { items: result } : result;
 }
