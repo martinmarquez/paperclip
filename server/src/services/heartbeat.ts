@@ -22012,6 +22012,9 @@ export function heartbeatService(
         resolve: () => resolveAssignedConnectionInstructionsForRun(db, { companyId: agent.companyId, agentId: agent.id, runId: run.id }),
         context, config: connectorDelivery.config, native: agent.adapterType === "paperclip_runner",
       });
+      // Once admitted as a review, a running token must never gain broader tools after a config edit.
+      context.paperclipReviewReadOnly = runtimeConfig.reviewReadOnly === true || run.contextSnapshot?.paperclipReviewReadOnly === true;
+      if (context.paperclipReviewReadOnly) runtimeConfig = { ...runtimeConfig, reviewReadOnly: true };
       const resolvedFailureSecrets = readFailureReportSecrets();
       readFailureReportSecrets = () => [
         ...resolvedFailureSecrets,
@@ -25203,7 +25206,8 @@ export function heartbeatService(
               });
             }
             if (authToken && configuredPaperclipApiBaseUrl() && issueRef) {
-              runtimeMcpServers.unshift({ name: "Paperclip projects", url: `${paperclipApiBaseUrl()}/api/mcp/project-tools`,
+              if (runtimeConfig.reviewReadOnly === true) runtimeMcpServers.splice(0);
+              runtimeMcpServers.unshift({ name: runtimeConfig.reviewReadOnly === true ? "Paperclip review task" : "Paperclip projects", url: `${paperclipApiBaseUrl()}/api/mcp/project-tools`,
                 token: authToken, connectionId: "paperclip-project-tools" });
             }
             const runtimeMcp = createAdapterRuntimeMcpAccess(runtimeMcpServers);

@@ -14,7 +14,8 @@ allowlists, subject, exact origin, live permission checks and Board/host reader.
 It creates the store with `ReviewPreflightSqlStore` and
 `createReviewPreflightSqlDatabase(db)`. The native adapter uses a dedicated
 connection for each transaction so cancellation never closes a shared client.
-There are no new dependencies, providers, credentials or default grants.
+It reuses the already installed TOML parser. There are no new services,
+providers, credentials or default grants.
 
 The two SQL tables now use the additive native migration `0306_review_preflight`.
 The schema, migration journal and Drizzle snapshot are included. CI compares the
@@ -80,16 +81,27 @@ expires observations after 15 minutes. Missing evidence remains UNKNOWN.
 ## Native review isolation
 
 For the two admitted reviewers only, an operator can set adapter config
-`reviewReadOnly: true`. The controller preserves the stored role boundary across task/router overrides
-and overrides the environment flag after adapter environment merge. Local native Codex then gets a fresh process, a
-per-turn lifecycle, read-only source and Git metadata, and a unique owner-only
-scratch directory. Existing warm sessions must close before the new session can
-start. Shell network, browser use, web search, code mode and remote plugins are disabled
-for this option at process startup and thread configuration. Inherited GitHub
-credentials are denied. Provider
-credentials remain outside the command sandbox. The provider must acknowledge
-`paperclip-runner-workspace-read-only` before a turn can start. Legacy ACP/CLI,
-remote execution and runnerd fallback are rejected for this option.
+`engine: "cli", reviewReadOnly: true`. The production `codex_local` CLI path
+uses a fresh private home, retains the existing model/provider, and excludes
+ambient permissions, hooks, unrelated MCPs and session state. Arbitrary extra
+arguments and resume are rejected. It does not install a CLI at execution time.
+Before inference, an app-server handshake without `turn/start` must confirm the
+same default permission profile used by `codex exec`; a legacy project sandbox
+override fails closed. The native profile makes source and Git metadata read-only,
+permits writes only in private scratch, and denies shell network, browser use,
+web search, code mode and remote plugins. Command environment inheritance is off.
+Credentials stay outside the command sandbox; refreshed OAuth credentials use
+the existing identity-aware atomic copy-back before private-home cleanup.
+ACP and remote fallback are rejected. The stored role boundary survives task/router
+overrides, and the run snapshot pins its review mode across later configuration edits.
+
+The only review MCP gateway is bound to the authenticated run's own task. It can
+read task context/comments/documents, checkout that task, save a revision-checked
+document, and record a blocked/review/done outcome through existing native API
+routes with the real run audit header. Arbitrary paths, other task IDs, assignment
+changes, project creation and wake requests are unavailable. Cancellation and
+identity checks remain native. This lets an isolated reviewer finish its report
+without granting shell access to the control-plane token or network.
 
 This option is not enabled by importing code or starting the bridge. A Linux CI
 pass does not certify Darwin enforcement. Calibrate the exact installed CLI on

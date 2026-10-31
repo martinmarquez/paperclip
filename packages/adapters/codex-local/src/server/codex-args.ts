@@ -50,6 +50,10 @@ export function buildCodexExecArgs(
   const fastModeRequested = asBoolean(record.fastMode, false);
   const fastModeApplied = fastModeRequested && isCodexLocalFastModeSupported(model);
   const extraArgs = readExtraArgs(record);
+  const reviewReadOnly = record.reviewReadOnly === true;
+  if (reviewReadOnly && (extraArgs.length || options.resumeSessionId)) {
+    throw new Error("review_read_only_requires_fresh_controlled_invocation");
+  }
   // Explicit CLI modes/profiles remain deliberate overrides. An omitted
   // setting uses the same full-auto default as agent creation and onboarding.
   const explicitSandbox = extraArgs.some((arg) =>
@@ -59,12 +63,12 @@ export function buildCodexExecArgs(
   const explicitPermissionRestriction = extraArgs.some((arg) =>
     /^(?:(?:--config=|-c=?)\s*)?(?:approval_policy\s*=|sandbox_workspace_write\.network_access\s*=\s*false)/.test(arg),
   );
-  const bypass = asBoolean(
+  const bypass = !reviewReadOnly && asBoolean(
     record.dangerouslyBypassApprovalsAndSandbox,
     asBoolean(record.dangerouslyBypassSandbox, !explicitSandbox && !explicitPermissionRestriction && options.networkAccess !== false && DEFAULT_CODEX_LOCAL_BYPASS_APPROVALS_AND_SANDBOX),
   );
   const args = ["exec", "--json"];
-  if (!bypass && !explicitSandbox) {
+  if (!reviewReadOnly && !bypass && !explicitSandbox) {
     args.push("-c", 'sandbox_mode="workspace-write"');
     args.push("-c", `sandbox_workspace_write.network_access=${options.networkAccess !== false}`);
   }
@@ -76,7 +80,7 @@ export function buildCodexExecArgs(
   if (options.skipGitRepoCheck && !extraArgs.includes(SKIP_GIT_REPO_CHECK_FLAG)) {
     args.push(SKIP_GIT_REPO_CHECK_FLAG);
   }
-  if (search) args.unshift("--search");
+  if (search && !reviewReadOnly) args.unshift("--search");
   if (bypass) args.push("--dangerously-bypass-approvals-and-sandbox");
   if (model) args.push("--model", model);
   if (modelReasoningEffort) {
@@ -86,7 +90,7 @@ export function buildCodexExecArgs(
     args.push("-c", 'service_tier="fast"', "-c", "features.fast_mode=true");
   }
   if (extraArgs.length > 0) args.push(...extraArgs);
-  if (!bypass && options.networkAccess === false) {
+  if (!reviewReadOnly && !bypass && options.networkAccess === false) {
     args.push("-c", "sandbox_workspace_write.network_access=false");
   }
   if (options.resumeSessionId) args.push("resume", options.resumeSessionId, "-");

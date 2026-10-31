@@ -4,7 +4,7 @@ import { readFile, mkdir, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { gzipSync } from "node:zlib";
 import { execFileSync } from "node:child_process";
-import ts from "typescript";
+import { transform } from "esbuild";
 
 const sha256 = bytes => createHash("sha256").update(bytes).digest("hex");
 const sourceSha = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
@@ -12,21 +12,19 @@ assert.equal(sourceSha, process.env.PAPERCLIP_CANDIDATE_SHA);
 const groups = [
   ["server", "@paperclipai/server", ["app", "index", "routes/openapi", "routes/review-preflight-bridge", "routes/review-preflight-operator-page", "services/heartbeat",
     "services/native-runtime/native-session-executor", "services/native-runtime/runtime-mode", "services/review-preflight-bridge", "services/review-preflight-sql-store",
-    "services/review-preflight-authority", "services/review-preflight-board-reader", "services/review-preflight-integration"]],
+    "services/review-preflight-authority", "services/review-preflight-board-reader", "services/review-preflight-integration", "routes/project-tools", "services/review-task-tools"]],
   ["packages/db", "@paperclipai/db", ["index", "review-preflight-sql", "schema/index", "schema/review_preflight"]],
   ["packages/shared", "@paperclipai/shared", ["constants"]],
-  ["packages/adapters/codex-local", "@paperclipai/adapter-codex-local", ["index", "server/execute"]],
+  ["packages/adapters/codex-local", "@paperclipai/adapter-codex-local", ["index", "server/execute", "server/codex-args", "server/review-isolation"]],
   ["packages/paperclip-runner", "@paperclipai/server/dist/vendor/paperclip-runner", ["drivers/codex/codex-security-config", "drivers/codex/codex-app-server-driver-impl"]],
 ];
 const files = [];
 for (const [sourceRoot, targetPackage, modules] of groups) for (const module of modules) {
   const sourcePath = `${sourceRoot}/src/${module}.ts`;
   const source = await readFile(sourcePath, "utf8");
-  const output = ts.transpileModule(source, { fileName: sourcePath, reportDiagnostics: true,
-    compilerOptions: { target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.ESNext, esModuleInterop: true, isolatedModules: true } });
-  assert.equal(output.diagnostics?.filter(item => item.category === ts.DiagnosticCategory.Error).length ?? 0, 0, sourcePath);
+  const output = await transform(source, { sourcefile: sourcePath, loader: "ts", target: "node24", format: "esm" });
   const target = targetPackage.includes("/vendor/") ? `node_modules/${targetPackage}/${module}.js` : `node_modules/${targetPackage}/dist/${module}.js`;
-  files.push({ file: target, content: output.outputText, sha256: sha256(output.outputText), sourcePath, sourceHash: sha256(source) });
+  files.push({ file: target, content: output.code, sha256: sha256(output.code), sourcePath, sourceHash: sha256(source) });
 }
 for (const module of ["migrations/0306_review_preflight.sql", "migrations/meta/_journal.json"]) {
   const sourcePath = `packages/db/src/${module}`;

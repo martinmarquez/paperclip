@@ -20,6 +20,42 @@ const support = await getEmbeddedPostgresTestSupport();
   afterAll(async () => { await server?.close(); if (originalSecret === undefined) delete process.env.PAPERCLIP_AGENT_JWT_SECRET; else process.env.PAPERCLIP_AGENT_JWT_SECRET = originalSecret; });
   const call = (fixture: Awaited<ReturnType<typeof server.fixture>>, tool: string, args: Record<string, unknown>) => fixture.authority.execute({ tool, arguments: args, callId: randomUUID() });
 
+  it("delivers only run-bound review operations and preserves native document CAS and cancellation", async () => {
+    const f = await server.fixture({ disableWakeOnDemand: true, contextSnapshot: { paperclipReviewReadOnly: true } });
+    await server.db.update(agents).set({ adapterType: "codex_local", adapterConfig: { engine: "cli", reviewReadOnly: true } }).where(eq(agents.id, f.agentId));
+    const token = createLocalAgentJwt(f.agentId, f.companyId, "codex_local", f.runId, f.responsibleUserId)!;
+    const previousApiUrl = process.env.PAPERCLIP_API_URL;
+    process.env.PAPERCLIP_API_URL = server.apiUrl;
+    const mcp = async (method: string, params?: unknown, bearer = token) => {
+      const response = await fetch(`${server.apiUrl}/api/mcp/project-tools`, { method: "POST",
+        headers: { Authorization: `Bearer ${bearer}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) });
+      return { status: response.status, body: await response.json() };
+    };
+    try {
+      const list = await mcp("tools/list");
+      expect(list.status).toBe(200);
+      expect(list.body.result.tools.map((tool: { name: string }) => tool.name)).toEqual(["paperclip_review_task"]);
+      await server.db.update(agents).set({ adapterConfig: { engine: "cli", reviewReadOnly: false } }).where(eq(agents.id, f.agentId));
+      expect((await mcp("tools/list")).body.result.tools.map((tool: { name: string }) => tool.name)).toEqual(["paperclip_review_task"]);
+      const request = (args: unknown) => mcp("tools/call", { name: "paperclip_review_task", arguments: args });
+      expect((await mcp("tools/call", { name: "create_task", arguments: {} })).body.result.isError).toBe(true);
+      expect((await request({ operation: "get_task", issueId: randomUUID() })).body.result.isError).toBe(true);
+      const doc = { operation: "save_document", key: "review", title: "Review", body: "Verified evidence", baseRevisionId: null };
+      const saved = await request(doc);
+      expect(saved.body.result.isError).not.toBe(true);
+      const read = await request({ operation: "get_document", key: "review" });
+      expect(read.body.result.structuredContent.body).toBe("Verified evidence");
+      expect((await request({ ...doc, body: "stale write" })).body.result.isError).toBe(true);
+      expect((await mcp("tools/list", undefined, "invalid-token")).status).toBe(401);
+      await server.db.update(heartbeatRuns).set({ status: "cancelled" }).where(eq(heartbeatRuns.id, f.runId));
+      expect((await request({ operation: "get_task" })).status).toBeGreaterThanOrEqual(400);
+    } finally {
+      if (previousApiUrl === undefined) delete process.env.PAPERCLIP_API_URL;
+      else process.env.PAPERCLIP_API_URL = previousApiUrl;
+    }
+  });
+
   it("pages only visible projects and prefilters low-trust agent and run scopes", async () => {
     const f = await server.fixture({ disableWakeOnDemand: true });
     const ids = Array.from({ length: 53 }, (_, i) => `abcdefab-0000-4000-8000-${String(i).padStart(12, "0")}`);
